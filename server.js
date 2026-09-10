@@ -13,7 +13,20 @@ if (!OPENAI_API_KEY) {
   console.warn('Warning: OPENAI_API_KEY is not set. Add it as an environment variable before deploying.');
 }
 
-const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions, simple line art suitable for a child to color in. Keep the likeness of the child from the reference photo consistent across the whole story.';
+const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions, simple line art suitable for a child to color in.';
+
+function subjectPhrase(childCount) {
+  if (childCount >= 3) return 'all three children';
+  if (childCount === 2) return 'both children';
+  return 'the child';
+}
+
+function consistencyLine(childCount) {
+  if (childCount > 1) {
+    return 'The reference photo shows ' + subjectPhrase(childCount) + '. Keep each child\'s individual likeness consistent across every scene, and show them together, interacting, in every scene.';
+  }
+  return 'Keep the likeness of the child from the reference photo consistent across the whole story.';
+}
 
 const STORY_SCENES = {
   'Superhero': [
@@ -86,10 +99,13 @@ const STORY_SCENES = {
   ]
 };
 
-function buildPrompt(theme, sceneIndex) {
+function buildPrompt(theme, sceneIndex, childCount) {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
-  const scene = scenes[sceneIndex] || scenes[0];
-  return `${BASE_STYLE} Scene: ${scene}.`;
+  let scene = scenes[sceneIndex] || scenes[0];
+  if (childCount > 1) {
+    scene = scene.replace(/\bthe child\b/g, subjectPhrase(childCount));
+  }
+  return `${BASE_STYLE} ${consistencyLine(childCount)} Scene: ${scene}.`;
 }
 
 app.get('/story-length', (req, res) => {
@@ -109,7 +125,9 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
 
     const theme = req.body.theme || 'Portrait';
     const sceneIndex = parseInt(req.body.sceneIndex, 10) || 0;
-    const prompt = buildPrompt(theme, sceneIndex);
+    let childCount = parseInt(req.body.childCount, 10) || 1;
+    childCount = Math.min(Math.max(childCount, 1), 3);
+    const prompt = buildPrompt(theme, sceneIndex, childCount);
 
     const form = new FormData();
     form.append('model', 'gpt-image-2');
