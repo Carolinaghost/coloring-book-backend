@@ -7,6 +7,41 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 app.use(cors());
+app.use(express.json({ limit: '15mb' }));
+
+// NOTE: orders live in memory only — they are wiped every time the server
+// restarts or redeploys. Fine for early testing, not fine once real
+// customers are ordering. Swap this for a real database before launch.
+let orders = [];
+let nextOrderId = 1;
+
+app.post('/orders', (req, res) => {
+  const { childName, childCount, email, theme, notes, thumb, pageCount } = req.body || {};
+  if (!childName || !email) {
+    return res.status(400).json({ error: 'Missing childName or email.' });
+  }
+  const order = {
+    id: nextOrderId++,
+    childName,
+    childCount: childCount || 1,
+    email,
+    theme: theme || 'Portrait',
+    notes: notes || '',
+    thumb: thumb || null,
+    pageCount: pageCount || 0,
+    submittedAt: new Date().toISOString()
+  };
+  orders.push(order);
+  res.json({ success: true, order });
+});
+
+app.get('/orders', (req, res) => {
+  const adminKey = process.env.ADMIN_KEY;
+  if (adminKey && req.query.key !== adminKey) {
+    return res.status(401).json({ error: 'Missing or incorrect admin key.' });
+  }
+  res.json({ orders: orders.slice().reverse() });
+});
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 if (!OPENAI_API_KEY) {
