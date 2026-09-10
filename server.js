@@ -50,17 +50,20 @@ if (!OPENAI_API_KEY) {
 
 const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions, simple line art suitable for a child to color in.';
 
-function subjectPhrase(childCount) {
-  if (childCount >= 3) return 'all three children';
-  if (childCount === 2) return 'both children';
-  return 'the child';
+function subjectPhrase(count, subjectType) {
+  const noun = subjectType === 'adult' ? 'people' : 'children';
+  const singularNoun = subjectType === 'adult' ? 'the person' : 'the child';
+  if (count >= 3) return 'all three ' + noun;
+  if (count === 2) return 'both ' + noun;
+  return singularNoun;
 }
 
-function consistencyLine(childCount) {
-  if (childCount > 1) {
-    return 'The reference photo shows ' + subjectPhrase(childCount) + '. Keep each child\'s individual likeness consistent across every scene, and show them together, interacting, in every scene.';
+function consistencyLine(count, subjectType) {
+  const possessive = subjectType === 'adult' ? 'person\'s' : 'child\'s';
+  if (count > 1) {
+    return 'The reference photo shows ' + subjectPhrase(count, subjectType) + '. Keep each ' + possessive + ' individual likeness consistent across every scene, and show them together, interacting, in every scene.';
   }
-  return 'Keep the likeness of the child from the reference photo consistent across the whole story.';
+  return 'Keep the likeness of ' + subjectPhrase(count, subjectType) + ' from the reference photo consistent across the whole story.';
 }
 
 const STORY_SCENES = {
@@ -131,16 +134,52 @@ const STORY_SCENES = {
     'a portrait of the child waving hello',
     'a portrait of the child hugging a stuffed animal',
     'a portrait of the child taking a bow'
+  ],
+  'Grandparent Garden': [
+    'the child watering flowers in a backyard garden',
+    'the child kneeling beside a row of vegetable plants, trowel in hand',
+    'the child holding up a freshly picked tomato, smiling proudly',
+    'the child planting a small tree together with a watering can nearby',
+    'the child sitting on a porch swing surrounded by potted plants',
+    'the child picking flowers for a bouquet',
+    'the child feeding birds at a garden birdfeeder',
+    'the child resting in a garden hammock under a shady tree',
+    'the child arranging cut flowers into a vase at an outdoor table',
+    'the child walking through a sunflower patch',
+    'the child harvesting apples from a small tree',
+    'the child sitting at a garden table having tea',
+    'the child raking autumn leaves into a pile in the yard',
+    'the child admiring a rainbow over the garden after rain',
+    'the child waving from the garden gate at golden hour'
+  ],
+  'Family Keepsake': [
+    'the child baking cookies in a cozy kitchen, apron on',
+    'the child reading a storybook aloud in an armchair by a window',
+    'the child stirring a pot of soup on the stove',
+    'the child setting the table for a family dinner',
+    'the child knitting or working on a craft at a table',
+    'the child looking through an old photo album on a couch',
+    'the child playing a board game at the kitchen table',
+    'the child decorating a holiday tree with ornaments',
+    'the child rocking gently in a rocking chair with a cup of tea',
+    'the child tending a warm fireplace in a cozy living room',
+    'the child wrapping a gift at a table covered in ribbon',
+    'the child walking hand in hand with a grandchild in the park',
+    'the child sitting on a porch swing watching the sunset',
+    'the child blowing out candles on a birthday cake',
+    'the child waving warmly from a front porch, welcoming guests'
   ]
 };
 
-function buildPrompt(theme, sceneIndex, childCount) {
+function buildPrompt(theme, sceneIndex, childCount, subjectType, notes) {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
   let scene = scenes[sceneIndex] || scenes[0];
-  if (childCount > 1) {
-    scene = scene.replace(/\bthe child\b/g, subjectPhrase(childCount));
+  scene = scene.replace(/\bthe child\b/g, subjectPhrase(childCount, subjectType));
+  let prompt = `${BASE_STYLE} ${consistencyLine(childCount, subjectType)} Scene: ${scene}.`;
+  if (notes && notes.trim()) {
+    prompt += ` Also incorporate this detail where it fits naturally: ${notes.trim()}.`;
   }
-  return `${BASE_STYLE} ${consistencyLine(childCount)} Scene: ${scene}.`;
+  return prompt;
 }
 
 app.get('/story-length', (req, res) => {
@@ -162,7 +201,9 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
     const sceneIndex = parseInt(req.body.sceneIndex, 10) || 0;
     let childCount = parseInt(req.body.childCount, 10) || 1;
     childCount = Math.min(Math.max(childCount, 1), 3);
-    const prompt = buildPrompt(theme, sceneIndex, childCount);
+    const subjectType = req.body.subjectType === 'adult' ? 'adult' : 'kid';
+    const notes = (req.body.notes || '').slice(0, 300);
+    const prompt = buildPrompt(theme, sceneIndex, childCount, subjectType, notes);
 
     const form = new FormData();
     form.append('model', 'gpt-image-2');
