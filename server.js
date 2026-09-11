@@ -291,21 +291,22 @@ app.get('/', (req, res) => {
 // Simple health check — also reports which storage engine is live, so you can
 // tell at a glance whether DATABASE_URL actually took effect on Render.
 app.get('/health', async (req, res) => {
+  const state = db.status();
   try {
     const count = await db.countOrders();
-    res.json({ ok: true, storage: db.usingPostgres ? 'postgres' : 'memory', orders: count });
+    res.json({ ok: true, storage: state.storage, dbReady: state.ready, orders: count });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, storage: state.storage, dbReady: state.ready, error: err.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 
-db.initDb()
-  .then(() => {
-    app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
-  })
-  .catch((err) => {
-    console.error('Could not initialise the database:', err);
-    process.exit(1);
-  });
+// Bind the port FIRST. If the database is asleep or unreachable, the service
+// still starts and /health reports the problem, instead of the whole deploy
+// failing because the host never saw a port open.
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+
+db.initDb().catch((err) => {
+  console.error('Database init failed:', err.message);
+});
