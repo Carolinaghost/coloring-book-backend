@@ -4,6 +4,7 @@ const multer = require('multer');
 const cors = require('cors');
 const db = require('./db');
 const crypto = require('crypto');
+const mailer = require('./mailer');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
@@ -75,6 +76,26 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
       const session = event.data.object;
       const order = await db.markPaid(session.id, session.amount_total);
       console.log(order ? `Order ${order.id} marked paid.` : `No order for session ${session.id}.`);
+
+      // Email the customer a link back to their book. This must never fail the
+      // webhook: Stripe retries on a non-2xx, and retrying a send we already
+      // made would just spam them. Log it and move on.
+      if (order && order.email && mailer.configured) {
+        try {
+          const full = await db.getOrderWithToken(order.id);
+          const msg = mailer.orderReadyEmail({
+            childName: order.childName,
+            orderId: order.id,
+            accessToken: full && full.accessToken,
+            siteUrl: SITE_URL,
+            pageCount: order.pageCount || 15
+          });
+          await mailer.sendMail({ to: order.email, subject: msg.subject, text: msg.text, html: msg.html });
+          console.log(`Receipt emailed for order ${order.id}.`);
+        } catch (mailErr) {
+          console.error(`Could not email receipt for order ${order.id}:`, mailErr.message);
+        }
+      }
     }
     res.json({ received: true });
   } catch (err) {
@@ -148,6 +169,28 @@ app.get('/orders/:id', async (req, res) => {
   } catch (err) {
     console.error('Failed to load order:', err);
     res.status(500).json({ error: 'Could not load the order.' });
+  }
+});
+
+// Admin-only: proves the SMTP settings work, and shows the real SMTP error if
+// they don't. Without this, a bad app password just looks like silence.
+app.post('/email-test', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const to = (req.body && req.body.to) || '';
+  if (!to) return res.status(400).json({ error: 'Pass { "to": "you@example.com" }.' });
+  if (!mailer.configured) {
+    return res.status(500).json({ error: 'SMTP_USER / SMTP_PASS are not set on the server.' });
+  }
+  try {
+    await mailer.sendMail({
+      to,
+      subject: 'Storybook You test email',
+      text: 'If you are reading this, order emails will work.',
+      html: '<p>If you are reading this, order emails will work.</p>'
+    });
+    res.json({ sent: true, host: mailer.HOST, port: mailer.PORT, secure: mailer.SECURE, from: mailer.USER });
+  } catch (err) {
+    res.status(502).json({ sent: false, host: mailer.HOST, port: mailer.PORT, secure: mailer.SECURE, error: err.message });
   }
 });
 
@@ -233,11 +276,16 @@ app.get('/orders/:id/access', async (req, res) => {
   try {
     const order = await db.authorizeOrder(req.params.id, req.query.token);
     if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
+    // childName and theme are here so an emailed recovery link can rebuild the
+    // PDF on a device that never had this order in local storage.
     res.json({
       id: order.id,
       paid: order.paid,
       status: order.status,
       product: order.product,
+      childName: order.childName,
+      theme: order.theme,
+      pageCount: order.pageCount,
       freePreviewPages: FREE_PREVIEW_PAGES
     });
   } catch (err) {
@@ -351,6 +399,57 @@ const STORY_SCENES = {
     'a portrait of the child waving hello',
     'a portrait of the child hugging a stuffed animal',
     'a portrait of the child taking a bow'
+  ],
+  'Firefighter': [
+    'the child tries on a firefighter helmet for the first time, grinning',
+    'the child slides down the fire station pole',
+    'the child polishes the big red fire engine',
+    'the child checks the hose and coils it neatly',
+    'the child climbs into the fire engine and takes the wheel',
+    'the child rides the fire engine with the ladder raised high',
+    'the child raises the ladder toward a tall building',
+    'the child rescues a kitten from a rooftop',
+    'the child carries a puppy to safety, wrapped in a blanket',
+    'the child sprays water from the hose onto a cartoon fire',
+    'the child teaches other kids the stop, drop and roll',
+    'the child stands proudly beside a dalmatian dog',
+    'the child receives a badge from the fire chief',
+    'the child waves from the fire engine in a town parade',
+    'the child rests at the station at sunset, helmet under one arm'
+  ],
+  'Police Officer': [
+    'the child puts on a police hat and badge for the first time',
+    'the child stands proudly next to a police car',
+    'the child helps a lost puppy find its way home',
+    'the child directs traffic at a busy crosswalk',
+    'the child helps a family cross the street safely',
+    'the child rides a police bicycle through a park',
+    'the child meets a friendly police dog and shakes its paw',
+    'the child returns a lost teddy bear to a smaller child',
+    'the child helps an elderly person carry groceries',
+    'the child talks with kids at a school assembly',
+    'the child hands out sticker badges to a group of children',
+    'the child leads a bike safety class in a parking lot',
+    'the child helps at a community picnic',
+    'the child receives a medal for helping others',
+    'the child waves from the police car at the end of the day'
+  ],
+  'Doctor': [
+    'the child puts on a white coat and a stethoscope',
+    'the child listens to a teddy bear\'s heartbeat with a stethoscope',
+    'the child checks a patient\'s temperature and smiles reassuringly',
+    'the child wraps a bandage around a stuffed rabbit\'s paw',
+    'the child looks into a microscope in a bright lab',
+    'the child reads an X-ray on a light board',
+    'the child comforts a nervous smaller child in the waiting room',
+    'the child gives a brave patient a sticker',
+    'the child washes hands carefully at a sink',
+    'the child takes notes on a clipboard during rounds',
+    'the child rides along in an ambulance, ready to help',
+    'the child teaches other kids how to stay healthy',
+    'the child helps a patient take their first steps again',
+    'the child celebrates with a patient who is going home',
+    'the child hangs up the white coat at the end of a long day, smiling'
   ],
   'Grandparent Garden': [
     'the child watering flowers in a backyard garden',
@@ -495,7 +594,7 @@ app.get('/health', async (req, res) => {
   const state = db.status();
   try {
     const count = await db.countOrders();
-    res.json({ ok: true, storage: state.storage, dbReady: state.ready, orders: count });
+    res.json({ ok: true, storage: state.storage, dbReady: state.ready, orders: count, email: mailer.configured ? 'configured' : 'not configured' });
   } catch (err) {
     res.status(500).json({ ok: false, storage: state.storage, dbReady: state.ready, error: err.message });
   }
