@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
+const db = require('./db');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
@@ -9,38 +10,83 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 *
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
 
-// NOTE: orders live in memory only — they are wiped every time the server
-// restarts or redeploys. Fine for early testing, not fine once real
-// customers are ordering. Swap this for a real database before launch.
-let orders = [];
-let nextOrderId = 1;
+// Orders are stored in Postgres (see db.js). Set DATABASE_URL and they survive
+// restarts and redeploys; leave it unset and db.js falls back to memory for
+// local testing only.
 
-app.post('/orders', (req, res) => {
+function requireAdmin(req, res) {
+  const adminKey = process.env.ADMIN_KEY;
+  if (adminKey && req.query.key !== adminKey) {
+    res.status(401).json({ error: 'Missing or incorrect admin key.' });
+    return false;
+  }
+  return true;
+}
+
+app.post('/orders', async (req, res) => {
   const { childName, childCount, email, theme, notes, thumb, pageCount } = req.body || {};
   if (!childName || !email) {
     return res.status(400).json({ error: 'Missing childName or email.' });
   }
-  const order = {
-    id: nextOrderId++,
-    childName,
-    childCount: childCount || 1,
-    email,
-    theme: theme || 'Portrait',
-    notes: notes || '',
-    thumb: thumb || null,
-    pageCount: pageCount || 0,
-    submittedAt: new Date().toISOString()
-  };
-  orders.push(order);
-  res.json({ success: true, order });
+  try {
+    const order = await db.saveOrder({
+      childName: String(childName).slice(0, 200),
+      childCount: Math.min(Math.max(parseInt(childCount, 10) || 1, 1), 3),
+      email: String(email).slice(0, 320),
+      theme: theme || 'Portrait',
+      notes: String(notes || '').slice(0, 1000),
+      thumb: thumb || null,
+      pageCount: parseInt(pageCount, 10) || 0
+    });
+    res.json({ success: true, order });
+  } catch (err) {
+    console.error('Failed to save order:', err);
+    res.status(500).json({ error: 'Could not save the order. Please try again.' });
+  }
 });
 
-app.get('/orders', (req, res) => {
-  const adminKey = process.env.ADMIN_KEY;
-  if (adminKey && req.query.key !== adminKey) {
-    return res.status(401).json({ error: 'Missing or incorrect admin key.' });
+app.get('/orders', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 1000);
+    const includeThumbs = req.query.thumbs === '1';
+    const orders = await db.listOrders({ limit, includeThumbs });
+    res.json({ orders, count: await db.countOrders(), storage: db.usingPostgres ? 'postgres' : 'memory' });
+  } catch (err) {
+    console.error('Failed to list orders:', err);
+    res.status(500).json({ error: 'Could not load orders.' });
   }
-  res.json({ orders: orders.slice().reverse() });
+});
+
+// Single order, thumbnail included — for opening one order in the admin view.
+app.get('/orders/:id', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const order = await db.getOrder(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+    res.json({ order });
+  } catch (err) {
+    console.error('Failed to load order:', err);
+    res.status(500).json({ error: 'Could not load the order.' });
+  }
+});
+
+const ORDER_STATUSES = ['new', 'in_progress', 'delivered', 'cancelled'];
+
+app.post('/orders/:id/status', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const status = (req.body && req.body.status) || '';
+  if (!ORDER_STATUSES.includes(status)) {
+    return res.status(400).json({ error: 'Status must be one of: ' + ORDER_STATUSES.join(', ') });
+  }
+  try {
+    const order = await db.updateOrderStatus(req.params.id, status);
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+    res.json({ success: true, order });
+  } catch (err) {
+    console.error('Failed to update order:', err);
+    res.status(500).json({ error: 'Could not update the order.' });
+  }
 });
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -242,5 +288,24 @@ app.get('/', (req, res) => {
   res.send('Coloring book conversion server is running.');
 });
 
+// Simple health check — also reports which storage engine is live, so you can
+// tell at a glance whether DATABASE_URL actually took effect on Render.
+app.get('/health', async (req, res) => {
+  try {
+    const count = await db.countOrders();
+    res.json({ ok: true, storage: db.usingPostgres ? 'postgres' : 'memory', orders: count });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+
+db.initDb()
+  .then(() => {
+    app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+  })
+  .catch((err) => {
+    console.error('Could not initialise the database:', err);
+    process.exit(1);
+  });
