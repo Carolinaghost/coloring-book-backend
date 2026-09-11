@@ -23,7 +23,10 @@ if (usingPostgres) {
     // signed by roots Node doesn't always carry, hence rejectUnauthorized.
     ssl: { rejectUnauthorized: false },
     max: 5,
-    idleTimeoutMillis: 30000
+    idleTimeoutMillis: 30000,
+    // Neon's free compute sleeps when idle; give the first connection room to
+    // wake it, but never hang forever.
+    connectionTimeoutMillis: 15000
   });
 
   pool.on('error', (err) => {
@@ -50,7 +53,13 @@ const CREATE_INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS orders_submitted_at_idx ON orders (submitted_at DESC);
 `;
 
-async function initDb() {
+let ready = false;
+let lastError = null;
+
+// Runs in the background AFTER the server is already listening, so a sleeping
+// database can never stop the service from starting. Retries a few times to
+// ride out a cold Neon compute or a brief network blip.
+async function initDb(attempt = 1) {
   if (!usingPostgres) {
     console.warn(
       'WARNING: DATABASE_URL is not set. Orders are being kept in memory and ' +
@@ -58,9 +67,29 @@ async function initDb() {
     );
     return;
   }
-  await pool.query(CREATE_TABLE_SQL);
-  await pool.query(CREATE_INDEX_SQL);
-  console.log('Connected to Postgres. Orders table is ready.');
+  try {
+    await pool.query(CREATE_TABLE_SQL);
+    await pool.query(CREATE_INDEX_SQL);
+    ready = true;
+    lastError = null;
+    console.log('Connected to Postgres. Orders table is ready.');
+  } catch (err) {
+    lastError = err.message;
+    console.error('Postgres init attempt ' + attempt + ' failed: ' + err.message);
+    if (attempt < 5) {
+      await new Promise((r) => setTimeout(r, attempt * 3000));
+      return initDb(attempt + 1);
+    }
+    console.error('Giving up on Postgres init for now. /health will show the error.');
+  }
+}
+
+function status() {
+  return {
+    storage: usingPostgres ? 'postgres' : 'memory',
+    ready: usingPostgres ? ready : true,
+    error: lastError
+  };
 }
 
 // Convert a database row into the shape the front end already expects.
@@ -161,6 +190,7 @@ async function countOrders() {
 
 module.exports = {
   usingPostgres,
+  status,
   initDb,
   saveOrder,
   listOrders,
