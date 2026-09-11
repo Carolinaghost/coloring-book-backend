@@ -8,6 +8,7 @@
 // swapping the storage engine later means touching this file only.
 
 const { Pool } = require('pg');
+const crypto = require('crypto');
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const usingPostgres = Boolean(DATABASE_URL);
@@ -45,9 +46,40 @@ const CREATE_TABLE_SQL = `
     thumb         TEXT,
     page_count    INTEGER     NOT NULL DEFAULT 0,
     status        TEXT        NOT NULL DEFAULT 'new',
-    submitted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    submitted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- payment
+    paid              BOOLEAN     NOT NULL DEFAULT FALSE,
+    paid_at           TIMESTAMPTZ,
+    amount_cents      INTEGER,
+    product           TEXT        NOT NULL DEFAULT 'digital',
+    stripe_session_id TEXT,
+    -- random secret handed to the browser so it can claim this order later
+    access_token      TEXT        NOT NULL
   );
 `;
+
+// Generated artwork, one row per scene. Kept so a customer can re-download
+// their book without us paying OpenAI to redraw it.
+const CREATE_PAGES_SQL = `
+  CREATE TABLE IF NOT EXISTS order_pages (
+    order_id    INTEGER     NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    scene_index INTEGER     NOT NULL,
+    image       TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (order_id, scene_index)
+  );
+`;
+
+// Columns added after the first release. Existing deployments already have an
+// orders table, so CREATE TABLE IF NOT EXISTS alone would silently skip these.
+const MIGRATIONS = [
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid BOOLEAN NOT NULL DEFAULT FALSE",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount_cents INTEGER",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS product TEXT NOT NULL DEFAULT 'digital'",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS stripe_session_id TEXT",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS access_token TEXT NOT NULL DEFAULT ''"
+];
 
 const CREATE_INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS orders_submitted_at_idx ON orders (submitted_at DESC);
@@ -70,6 +102,8 @@ async function initDb(attempt = 1) {
   try {
     await pool.query(CREATE_TABLE_SQL);
     await pool.query(CREATE_INDEX_SQL);
+    for (const sql of MIGRATIONS) await pool.query(sql);
+    await pool.query(CREATE_PAGES_SQL);
     ready = true;
     lastError = null;
     console.log('Connected to Postgres. Orders table is ready.');
@@ -104,15 +138,24 @@ function rowToOrder(row) {
     thumb: row.thumb,
     pageCount: row.page_count,
     status: row.status,
+    paid: row.paid === true,
+    paidAt: row.paid_at ? new Date(row.paid_at).toISOString() : null,
+    amountCents: row.amount_cents,
+    product: row.product,
     submittedAt: new Date(row.submitted_at).toISOString()
   };
 }
 
 async function saveOrder(order) {
+  // Secret the browser keeps so it can later prove this order is its own.
+  const accessToken = crypto.randomBytes(24).toString('hex');
+
   if (!usingPostgres) {
     const saved = {
       id: nextMemoryId++,
       status: 'new',
+      paid: false,
+      accessToken,
       submittedAt: new Date().toISOString(),
       ...order
     };
@@ -121,8 +164,8 @@ async function saveOrder(order) {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
     [
       order.childName,
@@ -131,10 +174,91 @@ async function saveOrder(order) {
       order.theme,
       order.notes,
       order.thumb,
-      order.pageCount
+      order.pageCount,
+      accessToken
     ]
   );
-  return rowToOrder(rows[0]);
+  const saved = rowToOrder(rows[0]);
+  // Returned once, on creation only — never included in any listing.
+  saved.accessToken = accessToken;
+  return saved;
+}
+
+// Constant-time check that the caller owns this order. Returns the order, or
+// null if the id is unknown or the token doesn't match.
+async function authorizeOrder(id, token) {
+  if (!token) return null;
+
+  let row;
+  if (!usingPostgres) {
+    row = memoryOrders.find((o) => o.id === Number(id));
+    if (!row) return null;
+    return safeEqual(row.accessToken, token) ? row : null;
+  }
+
+  const res = await pool.query('SELECT * FROM orders WHERE id = $1', [Number(id)]);
+  row = res.rows[0];
+  if (!row) return null;
+  return safeEqual(row.access_token, token) ? rowToOrder(row) : null;
+}
+
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a || ''));
+  const bufB = Buffer.from(String(b || ''));
+  // timingSafeEqual throws on length mismatch, so compare lengths separately.
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+async function markPaid(sessionId, amountCents) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.stripeSessionId === sessionId);
+    if (!o) return null;
+    o.paid = true;
+    o.status = 'in_progress';
+    return o;
+  }
+  const { rows } = await pool.query(
+    `UPDATE orders
+        SET paid = TRUE, paid_at = NOW(), amount_cents = COALESCE($2, amount_cents),
+            status = CASE WHEN status = 'new' THEN 'in_progress' ELSE status END
+      WHERE stripe_session_id = $1
+      RETURNING *`,
+    [sessionId, amountCents || null]
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+async function attachCheckoutSession(id, sessionId, amountCents) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(id));
+    if (o) { o.stripeSessionId = sessionId; o.amountCents = amountCents; }
+    return o || null;
+  }
+  const { rows } = await pool.query(
+    'UPDATE orders SET stripe_session_id = $2, amount_cents = $3 WHERE id = $1 RETURNING *',
+    [Number(id), sessionId, amountCents]
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+async function savePage(orderId, sceneIndex, image) {
+  if (!usingPostgres) return;
+  await pool.query(
+    `INSERT INTO order_pages (order_id, scene_index, image)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (order_id, scene_index) DO UPDATE SET image = EXCLUDED.image`,
+    [Number(orderId), Number(sceneIndex), image]
+  );
+}
+
+async function listPages(orderId) {
+  if (!usingPostgres) return [];
+  const { rows } = await pool.query(
+    'SELECT scene_index, image FROM order_pages WHERE order_id = $1 ORDER BY scene_index',
+    [Number(orderId)]
+  );
+  return rows.map((r) => ({ sceneIndex: r.scene_index, image: r.image }));
 }
 
 // Newest first. thumb images are large data URLs, so the list view skips them
@@ -193,6 +317,11 @@ module.exports = {
   status,
   initDb,
   saveOrder,
+  authorizeOrder,
+  attachCheckoutSession,
+  markPaid,
+  savePage,
+  listPages,
   listOrders,
   getOrder,
   updateOrderStatus,
