@@ -3,11 +3,87 @@ const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
 const db = require('./db');
+const crypto = require('crypto');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 app.use(cors());
+
+// ---------------------------------------------------------------------------
+// Payments
+// ---------------------------------------------------------------------------
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1900;
+const SITE_URL = process.env.SITE_URL || 'https://carolinaghost.github.io/-storybook-you-site';
+// Scenes the visitor can generate for free before being asked to pay.
+const FREE_PREVIEW_PAGES = parseInt(process.env.FREE_PREVIEW_PAGES, 10) || 2;
+
+// Verify Stripe's signature header against the raw request body.
+// Returns the parsed event, or throws. Never trust the body without this:
+// anyone who learns the webhook URL could otherwise mark orders paid.
+function verifyStripeSignature(rawBody, header, secret, toleranceSeconds = 300) {
+  if (!secret) throw new Error('STRIPE_WEBHOOK_SECRET is not set.');
+  if (!header) throw new Error('Missing Stripe-Signature header.');
+
+  const parts = {};
+  for (const piece of String(header).split(',')) {
+    const idx = piece.indexOf('=');
+    if (idx === -1) continue;
+    const k = piece.slice(0, idx).trim();
+    const v = piece.slice(idx + 1).trim();
+    if (k === 'v1') (parts.v1 = parts.v1 || []).push(v);
+    else parts[k] = v;
+  }
+  if (!parts.t || !parts.v1 || !parts.v1.length) throw new Error('Malformed Stripe-Signature header.');
+
+  const age = Math.floor(Date.now() / 1000) - parseInt(parts.t, 10);
+  if (!Number.isFinite(age) || Math.abs(age) > toleranceSeconds) {
+    throw new Error('Stripe signature timestamp outside tolerance.');
+  }
+
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(parts.t + '.' + rawBody.toString('utf8'), 'utf8')
+    .digest('hex');
+  const expectedBuf = Buffer.from(expected);
+
+  const matched = parts.v1.some((candidate) => {
+    const buf = Buffer.from(candidate);
+    if (buf.length !== expectedBuf.length) return false;
+    return crypto.timingSafeEqual(buf, expectedBuf);
+  });
+  if (!matched) throw new Error('Stripe signature mismatch.');
+
+  return JSON.parse(rawBody.toString('utf8'));
+}
+
+// Mounted before express.json() on purpose — signature verification needs the
+// exact bytes Stripe sent, not a re-serialised object.
+app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
+  let event;
+  try {
+    event = verifyStripeSignature(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Rejected webhook:', err.message);
+    return res.status(400).send('Invalid signature.');
+  }
+
+  try {
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const order = await db.markPaid(session.id, session.amount_total);
+      console.log(order ? `Order ${order.id} marked paid.` : `No order for session ${session.id}.`);
+    }
+    res.json({ received: true });
+  } catch (err) {
+    console.error('Webhook handling failed:', err);
+    // 500 tells Stripe to retry, which is what we want for a transient DB error.
+    res.status(500).send('Handler error.');
+  }
+});
+
 app.use(express.json({ limit: '15mb' }));
 
 // Orders are stored in Postgres (see db.js). Set DATABASE_URL and they survive
@@ -38,7 +114,11 @@ app.post('/orders', async (req, res) => {
       thumb: thumb || null,
       pageCount: parseInt(pageCount, 10) || 0
     });
-    res.json({ success: true, order });
+    // accessToken is returned exactly once, here. The browser must keep it;
+    // it is what proves ownership when unlocking or re-downloading the book.
+    const accessToken = order.accessToken;
+    delete order.accessToken;
+    res.json({ success: true, order, accessToken });
   } catch (err) {
     console.error('Failed to save order:', err);
     res.status(500).json({ error: 'Could not save the order. Please try again.' });
@@ -86,6 +166,97 @@ app.post('/orders/:id/status', async (req, res) => {
   } catch (err) {
     console.error('Failed to update order:', err);
     res.status(500).json({ error: 'Could not update the order.' });
+  }
+});
+
+// Creates a Stripe Checkout Session for an order and returns the URL to send
+// the customer to. Called with the order id and the access token we handed the
+// browser when the order was created.
+app.post('/checkout', async (req, res) => {
+  const { orderId, token, product } = req.body || {};
+  if (!STRIPE_SECRET_KEY) {
+    return res.status(500).json({ error: 'Payments are not configured on the server.' });
+  }
+
+  try {
+    const order = await db.authorizeOrder(orderId, token);
+    if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
+    if (order.paid) return res.status(409).json({ error: 'This order is already paid.' });
+
+    const isPrint = product === 'print';
+    const amount = isPrint ? PRICE_CENTS + 2000 : PRICE_CENTS;
+    const label = isPrint
+      ? 'Personalized coloring book - printed copy'
+      : 'Personalized coloring book - digital PDF';
+
+    // Stripe's API takes form-encoded bodies, not JSON.
+    const form = new URLSearchParams();
+    form.append('mode', 'payment');
+    form.append('success_url', `${SITE_URL}?paid=1&order=${order.id}`);
+    form.append('cancel_url', `${SITE_URL}?canceled=1&order=${order.id}`);
+    form.append('client_reference_id', String(order.id));
+    if (order.email) form.append('customer_email', order.email);
+    form.append('line_items[0][quantity]', '1');
+    form.append('line_items[0][price_data][currency]', 'usd');
+    form.append('line_items[0][price_data][unit_amount]', String(amount));
+    form.append('line_items[0][price_data][product_data][name]', label);
+    form.append('line_items[0][price_data][product_data][description]',
+      `${order.pageCount || 15} pages starring ${order.childName}`);
+    if (isPrint) form.append('shipping_address_collection[allowed_countries][0]', 'US');
+
+    const r = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: form
+    });
+    const session = await r.json();
+    if (!r.ok) {
+      console.error('Stripe error:', session);
+      const msg = (session.error && session.error.message) || 'Stripe rejected the request.';
+      return res.status(502).json({ error: 'Could not start checkout.', detail: msg });
+    }
+
+    await db.attachCheckoutSession(order.id, session.id, amount);
+    res.json({ url: session.url, amountCents: amount });
+  } catch (err) {
+    console.error('Checkout failed:', err);
+    res.status(500).json({ error: 'Could not start checkout.' });
+  }
+});
+
+// Lets the browser poll after returning from Stripe, and re-open a finished
+// book later. Requires the access token, so one customer can't read another's.
+app.get('/orders/:id/access', async (req, res) => {
+  try {
+    const order = await db.authorizeOrder(req.params.id, req.query.token);
+    if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
+    res.json({
+      id: order.id,
+      paid: order.paid,
+      status: order.status,
+      product: order.product,
+      freePreviewPages: FREE_PREVIEW_PAGES
+    });
+  } catch (err) {
+    console.error('Access check failed:', err);
+    res.status(500).json({ error: 'Could not load the order.' });
+  }
+});
+
+// Every page generated for a paid order, so the customer can rebuild the PDF
+// without us paying OpenAI to redraw anything.
+app.get('/orders/:id/pages', async (req, res) => {
+  try {
+    const order = await db.authorizeOrder(req.params.id, req.query.token);
+    if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
+    if (!order.paid) return res.status(402).json({ error: 'This order has not been paid for.' });
+    res.json({ pages: await db.listPages(order.id) });
+  } catch (err) {
+    console.error('Page fetch failed:', err);
+    res.status(500).json({ error: 'Could not load the pages.' });
   }
 });
 
@@ -245,6 +416,24 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
 
     const theme = req.body.theme || 'Portrait';
     const sceneIndex = parseInt(req.body.sceneIndex, 10) || 0;
+
+    // The paywall. The first FREE_PREVIEW_PAGES scenes are open so a visitor
+    // can see their own child as line art; everything past that needs a paid
+    // order. Without this check anyone could just loop /convert and take the
+    // whole book for free, at our OpenAI expense.
+    let paidOrder = null;
+    if (sceneIndex >= FREE_PREVIEW_PAGES) {
+      paidOrder = await db.authorizeOrder(req.body.orderId, req.body.token);
+      if (!paidOrder) {
+        return res.status(403).json({ error: 'Unknown order or bad token.' });
+      }
+      if (!paidOrder.paid) {
+        return res.status(402).json({
+          error: 'Payment required for the rest of the book.',
+          freePreviewPages: FREE_PREVIEW_PAGES
+        });
+      }
+    }
     let childCount = parseInt(req.body.childCount, 10) || 1;
     childCount = Math.min(Math.max(childCount, 1), 3);
     const subjectType = req.body.subjectType === 'adult' ? 'adult' : 'kid';
@@ -277,7 +466,19 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
       return res.status(502).json({ error: 'No image returned from OpenAI.' });
     }
 
-    res.json({ image: `data:image/png;base64,${b64}`, sceneIndex });
+    const image = `data:image/png;base64,${b64}`;
+
+    // Keep paid artwork so the customer can download it again later. A failure
+    // here must not cost them the page they just paid for, so it only warns.
+    if (paidOrder) {
+      try {
+        await db.savePage(paidOrder.id, sceneIndex, image);
+      } catch (storeErr) {
+        console.error('Could not store page:', storeErr.message);
+      }
+    }
+
+    res.json({ image, sceneIndex });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error converting image.' });
