@@ -242,6 +242,20 @@ async function attachCheckoutSession(id, sessionId, amountCents) {
   return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
+// Reads an order INCLUDING its access token. Only the webhook uses this, to
+// build the customer's recovery link. Never expose this through a route.
+async function getOrderWithToken(id) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(id));
+    return o || null;
+  }
+  const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [Number(id)]);
+  if (!rows[0]) return null;
+  const order = rowToOrder(rows[0]);
+  order.accessToken = rows[0].access_token;
+  return order;
+}
+
 async function savePage(orderId, sceneIndex, image) {
   if (!usingPostgres) return;
   await pool.query(
@@ -320,6 +334,7 @@ module.exports = {
   authorizeOrder,
   attachCheckoutSession,
   markPaid,
+  getOrderWithToken,
   savePage,
   listPages,
   listOrders,
