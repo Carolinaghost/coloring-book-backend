@@ -54,7 +54,12 @@ const CREATE_TABLE_SQL = `
     product           TEXT        NOT NULL DEFAULT 'digital',
     stripe_session_id TEXT,
     -- random secret handed to the browser so it can claim this order later
-    access_token      TEXT        NOT NULL
+    access_token      TEXT        NOT NULL,
+    -- the customer's photo, kept so the SERVER can draw the book after payment
+    -- without needing their browser to stay open
+    photo             TEXT,
+    subject_type      TEXT        NOT NULL DEFAULT 'kid',
+    generation_status TEXT        NOT NULL DEFAULT 'idle'
   );
 `;
 
@@ -78,7 +83,10 @@ const MIGRATIONS = [
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount_cents INTEGER",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS product TEXT NOT NULL DEFAULT 'digital'",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS stripe_session_id TEXT",
-  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS access_token TEXT NOT NULL DEFAULT ''"
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS access_token TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS photo TEXT",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS generation_status TEXT NOT NULL DEFAULT 'idle'",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS subject_type TEXT NOT NULL DEFAULT 'kid'"
 ];
 
 const CREATE_INDEX_SQL = `
@@ -142,6 +150,8 @@ function rowToOrder(row) {
     paidAt: row.paid_at ? new Date(row.paid_at).toISOString() : null,
     amountCents: row.amount_cents,
     product: row.product,
+    generationStatus: row.generation_status || 'idle',
+    subjectType: row.subject_type || 'kid',
     submittedAt: new Date(row.submitted_at).toISOString()
   };
 }
@@ -164,8 +174,8 @@ async function saveOrder(order) {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token, photo, subject_type)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [
       order.childName,
@@ -175,7 +185,9 @@ async function saveOrder(order) {
       order.notes,
       order.thumb,
       order.pageCount,
-      accessToken
+      accessToken,
+      order.photo || null,
+      order.subjectType === 'adult' ? 'adult' : 'kid'
     ]
   );
   const saved = rowToOrder(rows[0]);
@@ -338,6 +350,43 @@ async function deleteOrder(id) {
   return rows[0] ? { id: rows[0].id, childName: rows[0].child_name, paid: rows[0].paid === true } : null;
 }
 
+// Full row for the background renderer: includes the photo and the token.
+// Never reachable through a route.
+async function getOrderForRender(id) {
+  if (!usingPostgres) return memoryOrders.find((o) => o.id === Number(id)) || null;
+  const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [Number(id)]);
+  if (!rows[0]) return null;
+  const order = rowToOrder(rows[0]);
+  order.photo = rows[0].photo;
+  order.accessToken = rows[0].access_token;
+  return order;
+}
+
+async function setGenerationStatus(id, status) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(id));
+    if (o) o.generationStatus = status;
+    return;
+  }
+  await pool.query('UPDATE orders SET generation_status = $2 WHERE id = $1', [Number(id), status]);
+}
+
+// How many pages are already drawn - drives the progress display and lets a
+// restarted render skip work it already did.
+async function countPages(orderId) {
+  if (!usingPostgres) return 0;
+  const { rows } = await pool.query(
+    'SELECT COUNT(*)::int AS n FROM order_pages WHERE order_id = $1', [Number(orderId)]);
+  return rows[0].n;
+}
+
+async function doneSceneIndexes(orderId) {
+  if (!usingPostgres) return [];
+  const { rows } = await pool.query(
+    'SELECT scene_index FROM order_pages WHERE order_id = $1', [Number(orderId)]);
+  return rows.map((r) => r.scene_index);
+}
+
 async function countOrders() {
   if (!usingPostgres) return memoryOrders.length;
   const { rows } = await pool.query('SELECT COUNT(*)::int AS count FROM orders');
@@ -353,6 +402,10 @@ module.exports = {
   attachCheckoutSession,
   markPaid,
   getOrderWithToken,
+  getOrderForRender,
+  setGenerationStatus,
+  countPages,
+  doneSceneIndexes,
   savePage,
   listPages,
   deleteOrder,
