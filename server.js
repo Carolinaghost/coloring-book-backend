@@ -77,24 +77,13 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
       const order = await db.markPaid(session.id, session.amount_total);
       console.log(order ? `Order ${order.id} marked paid.` : `No order for session ${session.id}.`);
 
-      // Email the customer a link back to their book. This must never fail the
-      // webhook: Stripe retries on a non-2xx, and retrying a send we already
-      // made would just spam them. Log it and move on.
-      if (order && order.email && mailer.configured) {
-        try {
-          const full = await db.getOrderWithToken(order.id);
-          const msg = mailer.orderReadyEmail({
-            childName: order.childName,
-            orderId: order.id,
-            accessToken: full && full.accessToken,
-            siteUrl: SITE_URL,
-            pageCount: order.pageCount || 15
-          });
-          await mailer.sendMail({ to: order.email, subject: msg.subject, text: msg.text, html: msg.html });
-          console.log(`Receipt emailed for order ${order.id}.`);
-        } catch (mailErr) {
-          console.error(`Could not email receipt for order ${order.id}:`, mailErr.message);
-        }
+      // Start drawing the book on the server, in the background. We deliberately
+      // do NOT await it: Stripe times out webhooks in seconds, and a book takes
+      // minutes. The email goes out from renderBook once pages actually exist,
+      // so we never promise a book before it is real.
+      if (order) {
+        renderBook(order.id).catch((err) =>
+          console.error(`Order ${order.id}: background render crashed -`, err.message));
       }
     }
     res.json({ received: true });
@@ -133,7 +122,10 @@ app.post('/orders', async (req, res) => {
       theme: theme || 'Portrait',
       notes: String(notes || '').slice(0, 1000),
       thumb: thumb || null,
-      pageCount: parseInt(pageCount, 10) || 0
+      pageCount: parseInt(pageCount, 10) || 0,
+      // kept so the server can draw the book after payment without the browser
+      photo: typeof req.body.photo === 'string' ? req.body.photo : null,
+      subjectType: req.body.subjectType === 'adult' ? 'adult' : 'kid'
     });
     // accessToken is returned exactly once, here. The browser must keep it;
     // it is what proves ownership when unlocking or re-downloading the book.
@@ -307,6 +299,8 @@ app.get('/orders/:id/access', async (req, res) => {
       childName: order.childName,
       theme: order.theme,
       pageCount: order.pageCount,
+      generationStatus: order.generationStatus,
+      pagesReady: await db.countPages(order.id),
       freePreviewPages: FREE_PREVIEW_PAGES
     });
   } catch (err) {
@@ -519,6 +513,108 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes) {
   return prompt;
 }
 
+// One scene, one OpenAI call. Shared by the free preview route and the
+// background renderer so both produce identical artwork.
+async function renderScene({ buffer, mimetype, filename, prompt }) {
+  if (!OPENAI_API_KEY) throw new Error('Server is missing its OpenAI API key.');
+
+  const form = new FormData();
+  form.append('model', 'gpt-image-2');
+  form.append('prompt', prompt);
+  form.append('size', '1024x1024');
+  form.append('quality', 'medium');
+  form.append('image', new Blob([buffer], { type: mimetype || 'image/jpeg' }), filename || 'photo.png');
+
+  const response = await fetch('https://api.openai.com/v1/images/edits', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: form
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error((data.error && data.error.message) || 'Unknown error from OpenAI.');
+  }
+  const b64 = data.data && data.data[0] && data.data[0].b64_json;
+  if (!b64) throw new Error('No image returned from OpenAI.');
+  return `data:image/png;base64,${b64}`;
+}
+
+function dataUrlToBuffer(dataUrl) {
+  const parts = String(dataUrl || '').split(',');
+  if (parts.length < 2) throw new Error('Stored photo is not a data URL.');
+  const mimetype = (parts[0].match(/:(.*?);/) || [])[1] || 'image/jpeg';
+  return { buffer: Buffer.from(parts[1], 'base64'), mimetype };
+}
+
+// Orders currently being rendered in this process, so a Stripe webhook retry
+// or a second call can't start the same book twice.
+const rendering = new Set();
+
+// Draws the whole book on the SERVER after payment. The customer's browser
+// plays no part: they can close the tab, switch devices, or never come back,
+// and the book still gets made and emailed.
+async function renderBook(orderId) {
+  if (rendering.has(String(orderId))) {
+    console.log(`Order ${orderId} is already rendering; skipping duplicate start.`);
+    return;
+  }
+  rendering.add(String(orderId));
+  try {
+    const order = await db.getOrderForRender(orderId);
+    if (!order) throw new Error('Order not found.');
+    if (!order.paid) throw new Error('Order is not paid.');
+    if (!order.photo) throw new Error('No photo stored for this order.');
+
+    await db.setGenerationStatus(orderId, 'running');
+
+    const scenes = STORY_SCENES[order.theme] || STORY_SCENES['Portrait'];
+    const total = scenes.length;
+    const { buffer, mimetype } = dataUrlToBuffer(order.photo);
+    const already = new Set(await db.doneSceneIndexes(orderId));
+    const subjectType = order.subjectType === 'adult' ? 'adult' : 'kid';
+
+    let failures = 0;
+    for (let i = 0; i < total; i++) {
+      if (already.has(i)) continue;
+      const prompt = buildPrompt(order.theme, i, order.childCount, subjectType, order.notes);
+      try {
+        const image = await renderScene({ buffer, mimetype, filename: 'photo.jpg', prompt });
+        await db.savePage(orderId, i, image);
+        console.log(`Order ${orderId}: page ${i + 1}/${total} done.`);
+      } catch (err) {
+        failures++;
+        console.error(`Order ${orderId}: page ${i + 1} failed - ${err.message}`);
+      }
+    }
+
+    const done = await db.countPages(orderId);
+    await db.setGenerationStatus(orderId, done >= total ? 'done' : 'partial');
+    console.log(`Order ${orderId}: finished with ${done}/${total} pages (${failures} failures).`);
+
+    // Only now is the book real, so only now do we tell the customer.
+    if (order.email && mailer.configured && done > 0) {
+      try {
+        const msg = mailer.orderReadyEmail({
+          childName: order.childName,
+          orderId: order.id,
+          accessToken: order.accessToken,
+          siteUrl: SITE_URL,
+          pageCount: done
+        });
+        await mailer.sendMail({ to: order.email, subject: msg.subject, text: msg.text, html: msg.html });
+        console.log(`Order ${orderId}: ready-email sent.`);
+      } catch (mailErr) {
+        console.error(`Order ${orderId}: could not email - ${mailErr.message}`);
+      }
+    }
+  } catch (err) {
+    console.error(`Order ${orderId}: render failed - ${err.message}`);
+    try { await db.setGenerationStatus(orderId, 'failed'); } catch (e) {}
+  } finally {
+    rendering.delete(String(orderId));
+  }
+}
+
 app.get('/story-length', (req, res) => {
   const theme = req.query.theme || 'Portrait';
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
@@ -560,33 +656,18 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
     const notes = (req.body.notes || '').slice(0, 300);
     const prompt = buildPrompt(theme, sceneIndex, childCount, subjectType, notes);
 
-    const form = new FormData();
-    form.append('model', 'gpt-image-2');
-    form.append('prompt', prompt);
-    form.append('size', '1024x1024');
-    form.append('quality', 'medium');
-    form.append('image', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname || 'photo.png');
-
-    const response = await fetch('https://api.openai.com/v1/images/edits', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: form
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error('OpenAI error:', data);
-      const message = (data.error && data.error.message) || 'Unknown error from OpenAI.';
-      return res.status(502).json({ error: 'Image conversion failed.', detail: message });
+    let image;
+    try {
+      image = await renderScene({
+        buffer: req.file.buffer,
+        mimetype: req.file.mimetype,
+        filename: req.file.originalname || 'photo.png',
+        prompt
+      });
+    } catch (renderErr) {
+      console.error('OpenAI error:', renderErr.message);
+      return res.status(502).json({ error: 'Image conversion failed.', detail: renderErr.message });
     }
-
-    const b64 = data.data && data.data[0] && data.data[0].b64_json;
-    if (!b64) {
-      return res.status(502).json({ error: 'No image returned from OpenAI.' });
-    }
-
-    const image = `data:image/png;base64,${b64}`;
 
     // Keep paid artwork so the customer can download it again later. A failure
     // here must not cost them the page they just paid for, so it only warns.
