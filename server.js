@@ -862,20 +862,21 @@ db.initDb().catch((err) => {
   console.error('Database init failed:', err.message);
 });
 
-// Nothing should hold a child's photo indefinitely. Finished books drop theirs
-// as soon as they are drawn; this sweeps up the ones that failed or were
-// abandoned mid-way, and runs again every six hours while the service is up.
-const PHOTO_RETENTION_DAYS = parseInt(process.env.PHOTO_RETENTION_DAYS, 10) || 30;
-async function purgePhotos() {
+// Customers get RETENTION_DAYS to re-download their book. After that the pages
+// and everything personal are deleted, leaving only the sales record. The photo
+// itself goes much sooner - as soon as the book is drawn - so this is the
+// backstop for the rest, and for orders that never finished at all.
+const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || process.env.PHOTO_RETENTION_DAYS, 10) || 30;
+async function purgeOldData() {
   try {
-    const n = await db.purgeOldPhotos(PHOTO_RETENTION_DAYS);
-    if (n > 0) console.log(`Purged stored photos from ${n} order(s) older than ${PHOTO_RETENTION_DAYS} days.`);
+    const n = await db.purgeOldOrders(RETENTION_DAYS);
+    if (n > 0) console.log(`Purged ${n} order(s) older than ${RETENTION_DAYS} days: pages and personal details deleted.`);
   } catch (err) {
-    console.error('Photo purge failed:', err.message);
+    console.error('Retention purge failed:', err.message);
   }
 }
-setTimeout(purgePhotos, 60 * 1000);
-setInterval(purgePhotos, 6 * 60 * 60 * 1000);
+setTimeout(purgeOldData, 60 * 1000);
+setInterval(purgeOldData, 6 * 60 * 60 * 1000);
 
 // A book is drawn in this process's memory, so a restart - a deploy, a crash,
 // Render moving the instance - used to abandon whatever was mid-render, and
