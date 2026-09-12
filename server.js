@@ -16,7 +16,7 @@ app.use(cors());
 // ---------------------------------------------------------------------------
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
-const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1900;
+const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
 const SITE_URL = process.env.SITE_URL || 'https://carolinaghost.github.io/-storybook-you-site';
 // Scenes the visitor can generate for free before being asked to pay.
 const FREE_PREVIEW_PAGES = parseInt(process.env.FREE_PREVIEW_PAGES, 10) || 2;
@@ -563,6 +563,13 @@ async function renderBook(orderId) {
     const order = await db.getOrderForRender(orderId);
     if (!order) throw new Error('Order not found.');
     if (!order.paid) throw new Error('Order is not paid.');
+
+    // Already finished - a late webhook retry must not re-run this and must not
+    // knock a good book back to 'failed' just because the photo is gone now.
+    if (order.generationStatus === 'done') {
+      console.log(`Order ${orderId} is already done; nothing to render.`);
+      return;
+    }
     if (!order.photo) throw new Error('No photo stored for this order.');
 
     await db.setGenerationStatus(orderId, 'running');
@@ -590,6 +597,17 @@ async function renderBook(orderId) {
     const done = await db.countPages(orderId);
     await db.setGenerationStatus(orderId, done >= total ? 'done' : 'partial');
     console.log(`Order ${orderId}: finished with ${done}/${total} pages (${failures} failures).`);
+
+    // The book exists now, so the photo has done its job. Drop it. The pages we
+    // keep are drawings; the original picture of the child does not stay on disk.
+    if (done >= total) {
+      try {
+        await db.clearPhoto(orderId);
+        console.log(`Order ${orderId}: source photo deleted.`);
+      } catch (e) {
+        console.error(`Order ${orderId}: could not delete source photo - ${e.message}`);
+      }
+    }
 
     // Only now is the book real, so only now do we tell the customer.
     if (order.email && mailer.configured && done > 0) {
@@ -712,3 +730,18 @@ app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 db.initDb().catch((err) => {
   console.error('Database init failed:', err.message);
 });
+
+// Nothing should hold a child's photo indefinitely. Finished books drop theirs
+// as soon as they are drawn; this sweeps up the ones that failed or were
+// abandoned mid-way, and runs again every six hours while the service is up.
+const PHOTO_RETENTION_DAYS = parseInt(process.env.PHOTO_RETENTION_DAYS, 10) || 30;
+async function purgePhotos() {
+  try {
+    const n = await db.purgeOldPhotos(PHOTO_RETENTION_DAYS);
+    if (n > 0) console.log(`Purged stored photos from ${n} order(s) older than ${PHOTO_RETENTION_DAYS} days.`);
+  } catch (err) {
+    console.error('Photo purge failed:', err.message);
+  }
+}
+setTimeout(purgePhotos, 60 * 1000);
+setInterval(purgePhotos, 6 * 60 * 60 * 1000);
