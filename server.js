@@ -280,15 +280,39 @@ app.post('/checkout', async (req, res) => {
       `${order.pageCount || 15} pages starring ${order.childName}`);
     if (isPrint) form.append('shipping_address_collection[allowed_countries][0]', 'US');
 
-    const r = await fetch('https://api.stripe.com/v1/checkout/sessions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: form
-    });
-    const session = await r.json();
+    // Make the customer tick a box agreeing to immediate delivery before paying.
+    // Stripe records the acceptance against the payment, which is the evidence
+    // that matters if anyone later disputes the charge. It needs a terms URL set
+    // in Stripe's public business details, so if that is missing Stripe rejects
+    // the whole session - see the retry below.
+    const consent = new URLSearchParams(form);
+    consent.append('consent_collection[terms_of_service]', 'required');
+    consent.append('custom_text[terms_of_service_acceptance][message]',
+      'Your book starts being drawn as soon as you pay. I agree to the '
+      + '[terms](' + SITE_URL.replace(/\/+$/, '') + '/legal.html#terms)'
+      + ' and to immediate delivery.');
+
+    async function createSession(body) {
+      const resp = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body
+      });
+      return { ok: resp.ok, body: await resp.json() };
+    }
+
+    let r = await createSession(consent);
+    if (!r.ok) {
+      // Never let the consent box be the reason someone cannot buy. Log it loudly
+      // so it gets fixed, then fall back to a plain session.
+      console.error('Stripe rejected the consent-collecting session, falling back:',
+        (r.body.error && r.body.error.message) || r.body);
+      r = await createSession(form);
+    }
+    const session = r.body;
     if (!r.ok) {
       console.error('Stripe error:', session);
       const msg = (session.error && session.error.message) || 'Stripe rejected the request.';
