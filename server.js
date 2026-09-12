@@ -194,6 +194,27 @@ app.post('/email-test', async (req, res) => {
   }
 });
 
+// Admin-only, irreversible. Refuses paid orders unless force=1, so a stray
+// click can't wipe a record of money someone actually gave you.
+app.delete('/orders/:id', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const existing = await db.getOrder(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Order not found.' });
+    if (existing.paid && req.query.force !== '1') {
+      return res.status(409).json({
+        error: 'That order is paid. Deleting it destroys your record of the sale. Re-send with force=1 if you are sure.'
+      });
+    }
+    const gone = await db.deleteOrder(req.params.id);
+    console.log(`Order ${req.params.id} deleted by admin (paid=${existing.paid}).`);
+    res.json({ deleted: true, order: gone });
+  } catch (err) {
+    console.error('Delete failed:', err);
+    res.status(500).json({ error: 'Could not delete that order.' });
+  }
+});
+
 const ORDER_STATUSES = ['new', 'in_progress', 'delivered', 'cancelled'];
 
 app.post('/orders/:id/status', async (req, res) => {
