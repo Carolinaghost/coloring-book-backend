@@ -28,7 +28,7 @@ const RENDER_CONCURRENCY = parseInt(process.env.RENDER_CONCURRENCY, 10) || 4;
 // RENDER_CONCURRENCY lanes, so this is the real ceiling on memory and on calls
 // to OpenAI. Orders past the limit are not lost - they wait, and the resume
 // sweep starts them as slots free up. Busy should mean slow, never broken.
-const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 2;
+const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 4;
 // OpenAI caps images per minute across the whole account (Tier 3 is 50/min).
 // waitForImageSlot below is the single place that knows this, so no combination
 // of the settings above can exceed it - they queue here instead of erroring.
@@ -538,11 +538,17 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes) {
 // Timestamps of the images sent in the last minute. Small and self-trimming:
 // at 45 a minute this array never holds more than 45 numbers.
 const imageStamps = [];
-async function waitForImageSlot() {
+// Free previews may only use part of the budget. The rest is held back for
+// people who have paid: when a rush of browsers arrives, the customer waiting
+// on a book they bought should not end up behind a queue of window shoppers.
+const FREE_PREVIEW_BUDGET = Math.max(1, Math.floor(IMAGES_PER_MIN * 0.6));
+
+async function waitForImageSlot(paid) {
+  const ceiling = paid ? IMAGES_PER_MIN : FREE_PREVIEW_BUDGET;
   for (;;) {
     const now = Date.now();
     while (imageStamps.length && now - imageStamps[0] >= 60000) imageStamps.shift();
-    if (imageStamps.length < IMAGES_PER_MIN) {
+    if (imageStamps.length < ceiling) {
       imageStamps.push(now);
       return;
     }
@@ -551,8 +557,8 @@ async function waitForImageSlot() {
   }
 }
 
-async function renderScene({ buffer, mimetype, filename, prompt }) {
-  await waitForImageSlot();
+async function renderScene({ buffer, mimetype, filename, prompt, paid }) {
+  await waitForImageSlot(paid === true);
   if (!OPENAI_API_KEY) throw new Error('Server is missing its OpenAI API key.');
 
   const form = new FormData();
@@ -640,7 +646,7 @@ async function renderBook(orderId) {
         const sceneIndex = todo[slot];
         const prompt = buildPrompt(order.theme, sceneIndex, order.childCount, subjectType, order.notes);
         try {
-          const image = await renderScene({ buffer, mimetype, filename: 'photo.jpg', prompt });
+          const image = await renderScene({ buffer, mimetype, filename: 'photo.jpg', prompt, paid: true });
           await db.savePage(orderId, sceneIndex, image);
           console.log(`Order ${orderId}: page ${sceneIndex + 1}/${total} done.`);
         } catch (err) {
@@ -790,7 +796,8 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
         buffer: req.file.buffer,
         mimetype: req.file.mimetype,
         filename: req.file.originalname || 'photo.png',
-        prompt
+        prompt,
+        paid: paidOrder !== null
       });
     } catch (renderErr) {
       console.error('OpenAI error:', renderErr.message);
