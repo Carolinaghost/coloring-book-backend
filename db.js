@@ -400,28 +400,54 @@ async function clearPhoto(id) {
   await pool.query('UPDATE orders SET photo = NULL WHERE id = $1', [Number(id)]);
 }
 
-// Backstop for orders that never finished: a failed or abandoned order would
-// otherwise keep its photo forever. Returns how many rows were cleared.
-async function purgeOldPhotos(days) {
+// The retention sweep. Customers get a window to re-download their book; after
+// that the drawings and everything personal are deleted. What stays behind is a
+// bare sales record - order number, date, amount, Stripe reference - with no
+// name, no email and no images attached to it.
+async function purgeOldOrders(days) {
   const cutoffDays = Number(days) > 0 ? Number(days) : 30;
   if (!usingPostgres) {
     const cutoff = Date.now() - cutoffDays * 86400000;
     let n = 0;
     memoryOrders.forEach((o) => {
-      if ((o.photo || o.thumb) && new Date(o.submittedAt).getTime() < cutoff) {
-        o.photo = null;
-        o.thumb = null;
-        n++;
-      }
+      if (new Date(o.submittedAt).getTime() >= cutoff) return;
+      if (!o.photo && !o.thumb && !o.childName && !o.email && !o.accessToken) return;
+      o.photo = null;
+      o.thumb = null;
+      o.childName = '';
+      o.email = '';
+      o.notes = '';
+      o.accessToken = '';
+      n++;
     });
     return n;
   }
-  const { rowCount } = await pool.query(
-    'UPDATE orders SET photo = NULL, thumb = NULL '
-    + "WHERE submitted_at < NOW() - ($1 * INTERVAL '1 day') "
-    + 'AND (photo IS NOT NULL OR thumb IS NOT NULL)',
-    [cutoffDays]);
-  return rowCount;
+
+  // Both steps or neither: a half-purged order would keep its drawings while
+  // losing the token that proves who they belong to.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'DELETE FROM order_pages WHERE order_id IN ('
+      + '  SELECT id FROM orders WHERE submitted_at < NOW() - ($1 * INTERVAL \'1 day\')'
+      + ')',
+      [cutoffDays]);
+    const { rowCount } = await client.query(
+      'UPDATE orders SET photo = NULL, thumb = NULL, child_name = \'\', '
+      + "email = '', notes = '', access_token = '' "
+      + "WHERE submitted_at < NOW() - ($1 * INTERVAL '1 day') "
+      + "AND (photo IS NOT NULL OR thumb IS NOT NULL OR child_name <> '' "
+      + "     OR email <> '' OR access_token <> '')",
+      [cutoffDays]);
+    await client.query('COMMIT');
+    return rowCount;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Paid orders whose book never finished - the ones a restart, a crash or a
@@ -477,7 +503,7 @@ module.exports = {
   countPages,
   doneSceneIndexes,
   clearPhoto,
-  purgeOldPhotos,
+  purgeOldOrders,
   resumableOrders,
   bumpRenderAttempts,
   savePage,
