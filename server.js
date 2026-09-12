@@ -17,6 +17,10 @@ app.use(cors());
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
+// How many pages to draw at the same time. One at a time meant ~37s x 15 pages,
+// nearly ten minutes of waiting. Raise carefully: too many at once and OpenAI
+// starts rate limiting, which shows up as failed pages.
+const RENDER_CONCURRENCY = parseInt(process.env.RENDER_CONCURRENCY, 10) || 4;
 const SITE_URL = process.env.SITE_URL || 'https://carolinaghost.github.io/-storybook-you-site';
 // Scenes the visitor can generate for free before being asked to pay.
 const FREE_PREVIEW_PAGES = parseInt(process.env.FREE_PREVIEW_PAGES, 10) || 2;
@@ -580,19 +584,32 @@ async function renderBook(orderId) {
     const already = new Set(await db.doneSceneIndexes(orderId));
     const subjectType = order.subjectType === 'adult' ? 'adult' : 'kid';
 
+    // Pages that still need drawing, handed out to a small pool of workers so
+    // several are in flight at once. Each page is independent, so a failure only
+    // costs that page - the rest of the book carries on.
+    const todo = [];
+    for (let i = 0; i < total; i++) if (!already.has(i)) todo.push(i);
+
     let failures = 0;
-    for (let i = 0; i < total; i++) {
-      if (already.has(i)) continue;
-      const prompt = buildPrompt(order.theme, i, order.childCount, subjectType, order.notes);
-      try {
-        const image = await renderScene({ buffer, mimetype, filename: 'photo.jpg', prompt });
-        await db.savePage(orderId, i, image);
-        console.log(`Order ${orderId}: page ${i + 1}/${total} done.`);
-      } catch (err) {
-        failures++;
-        console.error(`Order ${orderId}: page ${i + 1} failed - ${err.message}`);
+    let nextUp = 0;
+    async function drawWorker() {
+      while (true) {
+        const slot = nextUp++;
+        if (slot >= todo.length) return;
+        const sceneIndex = todo[slot];
+        const prompt = buildPrompt(order.theme, sceneIndex, order.childCount, subjectType, order.notes);
+        try {
+          const image = await renderScene({ buffer, mimetype, filename: 'photo.jpg', prompt });
+          await db.savePage(orderId, sceneIndex, image);
+          console.log(`Order ${orderId}: page ${sceneIndex + 1}/${total} done.`);
+        } catch (err) {
+          failures++;
+          console.error(`Order ${orderId}: page ${sceneIndex + 1} failed - ${err.message}`);
+        }
       }
     }
+    const lanes = Math.max(1, Math.min(RENDER_CONCURRENCY, todo.length));
+    await Promise.all(Array.from({ length: lanes }, () => drawWorker()));
 
     const done = await db.countPages(orderId);
     await db.setGenerationStatus(orderId, done >= total ? 'done' : 'partial');
