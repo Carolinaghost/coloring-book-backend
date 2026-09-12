@@ -323,6 +323,21 @@ async function updateOrderStatus(id, status) {
   return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
+// Removes an order and, via ON DELETE CASCADE, its stored pages.
+// Admin-only at the route layer. There is no undo, so the caller confirms.
+async function deleteOrder(id) {
+  if (!usingPostgres) {
+    const i = memoryOrders.findIndex((o) => o.id === Number(id));
+    if (i === -1) return null;
+    return memoryOrders.splice(i, 1)[0];
+  }
+  const { rows } = await pool.query(
+    'DELETE FROM orders WHERE id = ' + String.fromCharCode(36) + '1 RETURNING id, child_name, paid',
+    [Number(id)]
+  );
+  return rows[0] ? { id: rows[0].id, childName: rows[0].child_name, paid: rows[0].paid === true } : null;
+}
+
 async function countOrders() {
   if (!usingPostgres) return memoryOrders.length;
   const { rows } = await pool.query('SELECT COUNT(*)::int AS count FROM orders');
@@ -340,6 +355,7 @@ module.exports = {
   getOrderWithToken,
   savePage,
   listPages,
+  deleteOrder,
   listOrders,
   getOrder,
   updateOrderStatus,
