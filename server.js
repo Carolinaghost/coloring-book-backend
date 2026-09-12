@@ -28,7 +28,11 @@ const RENDER_CONCURRENCY = parseInt(process.env.RENDER_CONCURRENCY, 10) || 4;
 // RENDER_CONCURRENCY lanes, so this is the real ceiling on memory and on calls
 // to OpenAI. Orders past the limit are not lost - they wait, and the resume
 // sweep starts them as slots free up. Busy should mean slow, never broken.
-const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 3;
+const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 2;
+// OpenAI caps images per minute across the whole account (Tier 3 is 50/min).
+// waitForImageSlot below is the single place that knows this, so no combination
+// of the settings above can exceed it - they queue here instead of erroring.
+const IMAGES_PER_MIN = parseInt(process.env.OPENAI_IMAGES_PER_MIN, 10) || 45;
 // Free previews cost us real money and no one has paid yet, so they get a
 // ceiling: per visitor, and across the whole site.
 const FREE_PREVIEWS_PER_IP = parseInt(process.env.FREE_PREVIEWS_PER_IP, 10) || 8;
@@ -531,7 +535,24 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes) {
 
 // One scene, one OpenAI call. Shared by the free preview route and the
 // background renderer so both produce identical artwork.
+// Timestamps of the images sent in the last minute. Small and self-trimming:
+// at 45 a minute this array never holds more than 45 numbers.
+const imageStamps = [];
+async function waitForImageSlot() {
+  for (;;) {
+    const now = Date.now();
+    while (imageStamps.length && now - imageStamps[0] >= 60000) imageStamps.shift();
+    if (imageStamps.length < IMAGES_PER_MIN) {
+      imageStamps.push(now);
+      return;
+    }
+    // Full for now. Sleep until the oldest one ages out, then look again.
+    await new Promise((r) => setTimeout(r, 60000 - (now - imageStamps[0]) + 50));
+  }
+}
+
 async function renderScene({ buffer, mimetype, filename, prompt }) {
+  await waitForImageSlot();
   if (!OPENAI_API_KEY) throw new Error('Server is missing its OpenAI API key.');
 
   const form = new FormData();
@@ -633,7 +654,8 @@ async function renderBook(orderId) {
 
     const done = await db.countPages(orderId);
     await db.setGenerationStatus(orderId, done >= total ? 'done' : 'partial');
-    console.log(`Order ${orderId}: finished with ${done}/${total} pages (${failures} failures).`);
+    const rssMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+    console.log(`Order ${orderId}: finished with ${done}/${total} pages (${failures} failures), memory ${rssMb}MB.`);
 
     // The book exists now, so the photo has done its job. Drop it. The pages we
     // keep are drawings; the original picture of the child does not stay on disk.
