@@ -10,6 +10,9 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 app.use(cors());
+// Render sits behind a proxy. Without this every request looks like it comes
+// from the same address and a per-visitor limit would lock out the whole world.
+app.set('trust proxy', 1);
 
 // ---------------------------------------------------------------------------
 // Payments
@@ -21,6 +24,15 @@ const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
 // nearly ten minutes of waiting. Raise carefully: too many at once and OpenAI
 // starts rate limiting, which shows up as failed pages.
 const RENDER_CONCURRENCY = parseInt(process.env.RENDER_CONCURRENCY, 10) || 4;
+// How many whole books may be drawn at the same time. Each one uses
+// RENDER_CONCURRENCY lanes, so this is the real ceiling on memory and on calls
+// to OpenAI. Orders past the limit are not lost - they wait, and the resume
+// sweep starts them as slots free up. Busy should mean slow, never broken.
+const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 3;
+// Free previews cost us real money and no one has paid yet, so they get a
+// ceiling: per visitor, and across the whole site.
+const FREE_PREVIEWS_PER_IP = parseInt(process.env.FREE_PREVIEWS_PER_IP, 10) || 8;
+const FREE_PREVIEWS_PER_HOUR = parseInt(process.env.FREE_PREVIEWS_PER_HOUR, 10) || 240;
 const SITE_URL = process.env.SITE_URL || 'https://carolinaghost.github.io/-storybook-you-site';
 // Scenes the visitor can generate for free before being asked to pay.
 const FREE_PREVIEW_PAGES = parseInt(process.env.FREE_PREVIEW_PAGES, 10) || 2;
@@ -562,6 +574,13 @@ async function renderBook(orderId) {
     console.log(`Order ${orderId} is already rendering; skipping duplicate start.`);
     return;
   }
+  // At capacity. Leave the order exactly as it is and walk away - it stays
+  // paid, it keeps its photo, and resumeUnfinished picks it up when a slot
+  // opens. This is the whole reason a rush makes us slow instead of dead.
+  if (rendering.size >= MAX_CONCURRENT_BOOKS) {
+    console.log(`Order ${orderId} is waiting: ${rendering.size} books already in progress.`);
+    return;
+  }
   rendering.add(String(orderId));
   try {
     const order = await db.getOrderForRender(orderId);
@@ -648,6 +667,8 @@ async function renderBook(orderId) {
     try { await db.setGenerationStatus(orderId, 'failed'); } catch (e) {}
   } finally {
     rendering.delete(String(orderId));
+    // A slot just opened; drain the queue rather than waiting for the timer.
+    setTimeout(resumeUnfinished, 1000);
   }
 }
 
@@ -656,6 +677,42 @@ app.get('/story-length', (req, res) => {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
   res.json({ theme, sceneCount: scenes.length });
 });
+
+// A small rate limiter for free previews. No dependency, no store: a Map of
+// visitor -> timestamps inside a rolling hour, plus a site-wide count. It
+// resets when the process does, which is fine - it exists to blunt a spike and
+// to stop one person looping the free endpoint, not to bill anyone.
+const previewHits = new Map();
+let sitePreviewWindow = { start: Date.now(), count: 0 };
+
+function takeFreePreview(ip) {
+  const now = Date.now();
+  const hour = 60 * 60 * 1000;
+
+  if (now - sitePreviewWindow.start > hour) sitePreviewWindow = { start: now, count: 0 };
+  if (sitePreviewWindow.count >= FREE_PREVIEWS_PER_HOUR) return 'site';
+
+  const seen = (previewHits.get(ip) || []).filter((t) => now - t < hour);
+  if (seen.length >= FREE_PREVIEWS_PER_IP) {
+    previewHits.set(ip, seen);
+    return 'visitor';
+  }
+
+  seen.push(now);
+  previewHits.set(ip, seen);
+  sitePreviewWindow.count++;
+  return null;
+}
+
+// Drop visitors we have not seen in an hour so the Map cannot grow forever.
+setInterval(() => {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const [ip, times] of previewHits) {
+    const live = times.filter((t) => t > cutoff);
+    if (live.length === 0) previewHits.delete(ip);
+    else previewHits.set(ip, live);
+  }
+}, 15 * 60 * 1000);
 
 app.post('/convert', upload.single('photo'), async (req, res) => {
   try {
@@ -674,7 +731,20 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
     // order. Without this check anyone could just loop /convert and take the
     // whole book for free, at our OpenAI expense.
     let paidOrder = null;
-    if (sceneIndex >= FREE_PREVIEW_PAGES) {
+    if (sceneIndex < FREE_PREVIEW_PAGES) {
+      // Nobody has paid for this one yet, so it has to be rationed.
+      const blocked = takeFreePreview(req.ip || 'unknown');
+      if (blocked === 'visitor') {
+        return res.status(429).json({
+          error: 'You have used up the free previews for now. Try again in an hour, or finish an order to get the whole book.'
+        });
+      }
+      if (blocked === 'site') {
+        return res.status(429).json({
+          error: 'We are busier than usual and free previews are paused for a few minutes. Please try again shortly.'
+        });
+      }
+    } else {
       paidOrder = await db.authorizeOrder(req.body.orderId, req.body.token);
       if (!paidOrder) {
         return res.status(403).json({ error: 'Unknown order or bad token.' });
@@ -775,16 +845,20 @@ async function resumeUnfinished() {
   if (sweeping) return;
   sweeping = true;
   try {
+    const free = MAX_CONCURRENT_BOOKS - rendering.size;
+    if (free <= 0) return;
     const ids = await db.resumableOrders(MAX_RENDER_ATTEMPTS);
-    const pending = ids.filter((id) => !rendering.has(String(id)));
-    if (pending.length === 0) return;
-    console.log(`Resuming ${pending.length} unfinished order(s): ${pending.join(', ')}`);
-    // One at a time. Each book already runs RENDER_CONCURRENCY pages in
-    // parallel, and a backlog should not multiply that into a stampede.
-    for (const id of pending) {
-      await renderBook(id).catch((err) =>
+    const waiting = ids.filter((id) => !rendering.has(String(id)));
+    if (waiting.length === 0) return;
+    const starting = waiting.slice(0, free);
+    console.log(`Starting ${starting.length} waiting order(s): ${starting.join(', ')}`
+      + (waiting.length > starting.length ? ` (${waiting.length - starting.length} still queued)` : ''));
+    // Started, not awaited: renderBook claims its slot synchronously, so the
+    // cap holds, and this sweep does not sit here for the length of a book.
+    starting.forEach((id) => {
+      renderBook(id).catch((err) =>
         console.error(`Order ${id}: resume failed -`, err.message));
-    }
+    });
   } catch (err) {
     console.error('Resume sweep failed:', err.message);
   } finally {
@@ -794,4 +868,4 @@ async function resumeUnfinished() {
 // Once shortly after boot (the restart case), then periodically for anything
 // that dies while we are up.
 setTimeout(resumeUnfinished, 20 * 1000);
-setInterval(resumeUnfinished, 10 * 60 * 1000);
+setInterval(resumeUnfinished, 60 * 1000);
