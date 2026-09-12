@@ -28,7 +28,7 @@ const RENDER_CONCURRENCY = parseInt(process.env.RENDER_CONCURRENCY, 10) || 4;
 // RENDER_CONCURRENCY lanes, so this is the real ceiling on memory and on calls
 // to OpenAI. Orders past the limit are not lost - they wait, and the resume
 // sweep starts them as slots free up. Busy should mean slow, never broken.
-const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 4;
+const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 7;
 // OpenAI caps images per minute across the whole account (Tier 3 is 50/min).
 // waitForImageSlot below is the single place that knows this, so no combination
 // of the settings above can exceed it - they queue here instead of erroring.
