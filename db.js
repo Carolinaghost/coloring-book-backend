@@ -387,6 +387,42 @@ async function doneSceneIndexes(orderId) {
   return rows.map((r) => r.scene_index);
 }
 
+// A customer's photo is only needed until the book is drawn. Once it is, we
+// throw the photo away - we are holding pictures of children, and the safest
+// place for them is nowhere.
+async function clearPhoto(id) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(id));
+    if (o) o.photo = null;
+    return;
+  }
+  await pool.query('UPDATE orders SET photo = NULL WHERE id = $1', [Number(id)]);
+}
+
+// Backstop for orders that never finished: a failed or abandoned order would
+// otherwise keep its photo forever. Returns how many rows were cleared.
+async function purgeOldPhotos(days) {
+  const cutoffDays = Number(days) > 0 ? Number(days) : 30;
+  if (!usingPostgres) {
+    const cutoff = Date.now() - cutoffDays * 86400000;
+    let n = 0;
+    memoryOrders.forEach((o) => {
+      if ((o.photo || o.thumb) && new Date(o.submittedAt).getTime() < cutoff) {
+        o.photo = null;
+        o.thumb = null;
+        n++;
+      }
+    });
+    return n;
+  }
+  const { rowCount } = await pool.query(
+    'UPDATE orders SET photo = NULL, thumb = NULL '
+    + "WHERE submitted_at < NOW() - ($1 * INTERVAL '1 day') "
+    + 'AND (photo IS NOT NULL OR thumb IS NOT NULL)',
+    [cutoffDays]);
+  return rowCount;
+}
+
 async function countOrders() {
   if (!usingPostgres) return memoryOrders.length;
   const { rows } = await pool.query('SELECT COUNT(*)::int AS count FROM orders');
@@ -406,6 +442,8 @@ module.exports = {
   setGenerationStatus,
   countPages,
   doneSceneIndexes,
+  clearPhoto,
+  purgeOldPhotos,
   savePage,
   listPages,
   deleteOrder,
