@@ -576,6 +576,7 @@ async function renderBook(orderId) {
     }
     if (!order.photo) throw new Error('No photo stored for this order.');
 
+    await db.bumpRenderAttempts(orderId);
     await db.setGenerationStatus(orderId, 'running');
 
     const scenes = STORY_SCENES[order.theme] || STORY_SCENES['Portrait'];
@@ -762,3 +763,35 @@ async function purgePhotos() {
 }
 setTimeout(purgePhotos, 60 * 1000);
 setInterval(purgePhotos, 6 * 60 * 60 * 1000);
+
+// A book is drawn in this process's memory, so a restart - a deploy, a crash,
+// Render moving the instance - used to abandon whatever was mid-render, and
+// nothing ever picked it up again. The customer had paid. This sweep finds
+// those orders and finishes them. renderBook skips pages that already exist,
+// so resuming costs only the pages that are actually missing.
+const MAX_RENDER_ATTEMPTS = parseInt(process.env.MAX_RENDER_ATTEMPTS, 10) || 5;
+let sweeping = false;
+async function resumeUnfinished() {
+  if (sweeping) return;
+  sweeping = true;
+  try {
+    const ids = await db.resumableOrders(MAX_RENDER_ATTEMPTS);
+    const pending = ids.filter((id) => !rendering.has(String(id)));
+    if (pending.length === 0) return;
+    console.log(`Resuming ${pending.length} unfinished order(s): ${pending.join(', ')}`);
+    // One at a time. Each book already runs RENDER_CONCURRENCY pages in
+    // parallel, and a backlog should not multiply that into a stampede.
+    for (const id of pending) {
+      await renderBook(id).catch((err) =>
+        console.error(`Order ${id}: resume failed -`, err.message));
+    }
+  } catch (err) {
+    console.error('Resume sweep failed:', err.message);
+  } finally {
+    sweeping = false;
+  }
+}
+// Once shortly after boot (the restart case), then periodically for anything
+// that dies while we are up.
+setTimeout(resumeUnfinished, 20 * 1000);
+setInterval(resumeUnfinished, 10 * 60 * 1000);
