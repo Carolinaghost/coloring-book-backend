@@ -155,7 +155,8 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
     who + "'s coloring book (" + pageCount + ' pages) is ready to download:',
     link,
     '',
-    'Keep this link - it is how you get back to your book later.',
+    'Keep this link - it is how you get back to your book. It works for 30 days,',
+    'so download the PDF and save it somewhere safe.',
     '',
     '- Storybook You'
   ].join('\n');
@@ -164,7 +165,8 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
     '<h2 style="color:#2F5FA8;">Your coloring book is ready</h2>',
     '<p>Thanks for your order! ' + who + "'s coloring book (" + pageCount + ' pages) is ready.</p>',
     '<p><a href="' + link + '" style="display:inline-block;background:#2F5FA8;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:bold;">Download your book</a></p>',
-    '<p style="font-size:13px;color:#6B6357;">Keep this email - that link is how you get back to your book later.</p>',
+    '<p style="font-size:13px;color:#6B6357;">Keep this email - that link is how you get back to your book. '
+    + 'It works for <strong>30 days</strong>, so download the PDF and save it somewhere safe.</p>',
     '</div>'
   ].join('');
   return { subject, text, html };
