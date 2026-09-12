@@ -86,7 +86,8 @@ const MIGRATIONS = [
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS access_token TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS photo TEXT",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS generation_status TEXT NOT NULL DEFAULT 'idle'",
-  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS subject_type TEXT NOT NULL DEFAULT 'kid'"
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS subject_type TEXT NOT NULL DEFAULT 'kid'",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS render_attempts INTEGER NOT NULL DEFAULT 0"
 ];
 
 const CREATE_INDEX_SQL = `
@@ -423,6 +424,39 @@ async function purgeOldPhotos(days) {
   return rowCount;
 }
 
+// Paid orders whose book never finished - the ones a restart, a crash or a
+// deploy left behind. They still have their photo, so they can be picked up
+// where they stopped. Orders that have already burned through maxAttempts are
+// left alone: something about them is broken, and retrying forever would just
+// spend money on the same failure.
+async function resumableOrders(maxAttempts) {
+  const cap = Number(maxAttempts) > 0 ? Number(maxAttempts) : 5;
+  if (!usingPostgres) {
+    return memoryOrders
+      .filter((o) => o.paid && o.generationStatus !== 'done' && o.photo
+        && (o.renderAttempts || 0) < cap)
+      .map((o) => o.id);
+  }
+  const { rows } = await pool.query(
+    'SELECT id FROM orders '
+    + "WHERE paid = TRUE AND generation_status <> 'done' "
+    + 'AND photo IS NOT NULL AND render_attempts < $1 ORDER BY id',
+    [cap]);
+  return rows.map((r) => r.id);
+}
+
+// Counted before each attempt, not after, so an order that crashes the process
+// every time still runs out of attempts instead of looping forever.
+async function bumpRenderAttempts(id) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(id));
+    if (o) o.renderAttempts = (o.renderAttempts || 0) + 1;
+    return;
+  }
+  await pool.query(
+    'UPDATE orders SET render_attempts = render_attempts + 1 WHERE id = $1', [Number(id)]);
+}
+
 async function countOrders() {
   if (!usingPostgres) return memoryOrders.length;
   const { rows } = await pool.query('SELECT COUNT(*)::int AS count FROM orders');
@@ -444,6 +478,8 @@ module.exports = {
   doneSceneIndexes,
   clearPhoto,
   purgeOldPhotos,
+  resumableOrders,
+  bumpRenderAttempts,
   savePage,
   listPages,
   deleteOrder,
