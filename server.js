@@ -759,6 +759,7 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
     // order. Without this check anyone could just loop /convert and take the
     // whole book for free, at our OpenAI expense.
     let paidOrder = null;
+    let previewOrder = null;
     if (sceneIndex < FREE_PREVIEW_PAGES) {
       // Nobody has paid for this one yet, so it has to be rationed.
       const blocked = takeFreePreview(req.ip || 'unknown');
@@ -771,6 +772,12 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
         return res.status(429).json({
           error: 'We are busier than usual and free previews are paused for a few minutes. Please try again shortly.'
         });
+      }
+      // A preview still belongs to an order. Identify it - payment not required
+      // - so the drawn page can be kept. Then a retry after a dropped phone
+      // connection costs nothing instead of paying OpenAI to draw it twice.
+      if (req.body.orderId && req.body.token) {
+        previewOrder = await db.authorizeOrder(req.body.orderId, req.body.token);
       }
     } else {
       paidOrder = await db.authorizeOrder(req.body.orderId, req.body.token);
@@ -804,15 +811,22 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
       return res.status(502).json({ error: 'Image conversion failed.', detail: renderErr.message });
     }
 
-    // Keep paid artwork so the customer can download it again later. A failure
-    // here must not cost them the page they just paid for, so it only warns.
-    if (paidOrder) {
+    // Keep the artwork so it can be downloaded again later, and so a retry
+    // never redraws something we already have. A failure here must not cost the
+    // customer the page, so it only warns.
+    const storeFor = paidOrder || previewOrder;
+    if (storeFor) {
       try {
-        await db.savePage(paidOrder.id, sceneIndex, image);
+        await db.savePage(storeFor.id, sceneIndex, image);
       } catch (storeErr) {
         console.error('Could not store page:', storeErr.message);
       }
     }
+
+    // Logged on success too. Without this a page that was drawn but never
+    // reached the customer looks identical to one that was never drawn.
+    console.log(`Converted scene ${sceneIndex + 1} (${paidOrder ? 'paid' : 'preview'})`
+      + (storeFor ? ` for order ${storeFor.id}` : '') + '.');
 
     res.json({ image, sceneIndex });
   } catch (err) {
