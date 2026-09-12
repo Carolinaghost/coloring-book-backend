@@ -285,7 +285,10 @@ async function listOrders({ limit = 200, includeThumbs = false } = {}) {
 
   const columns = includeThumbs
     ? '*'
-    : 'id, child_name, child_count, email, theme, notes, NULL AS thumb, page_count, status, submitted_at';
+    // Every field the admin view needs. access_token and stripe_session_id are
+    // deliberately NOT selected - nothing that grants access leaves through a list.
+    : 'id, child_name, child_count, email, theme, notes, NULL AS thumb, page_count, '
+      + 'status, submitted_at, paid, paid_at, amount_cents, product';
 
   const { rows } = await pool.query(
     `SELECT ${columns} FROM orders ORDER BY submitted_at DESC, id DESC LIMIT $1`,
