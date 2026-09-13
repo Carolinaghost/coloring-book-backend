@@ -1,4 +1,5 @@
 require('dotenv').config();
+const sharp = require('sharp');
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -404,31 +405,32 @@ const PHOTO_USE = 'Use the reference photo only for the faces, hair and features
 // passport photos. buildPrompt walks this list with sceneIndex, and every theme
 // is 15 scenes long, so a book uses each entry once and never repeats a shot.
 //
-// Three rules hold this list together. Only four entries - marked ANGLED - turn
-// the face away from the viewer, because the likeness is what the book is sold
-// on; they sit on pages 5, 8, 11 and 14, away from the free preview and away
-// from the last page. Every other entry still moves the camera off the angle
-// the reference photo was taken at, varying height, distance and composition
-// instead of hiding the face. And the first two entries - the free preview, the
-// pages that sell the book - show the faces from a camera position a phone
-// snapshot is not taken from, so the preview cannot come back looking like the
-// photo that was just uploaded. Keep all three rules if you reorder this.
+// Every entry moves two things: where the head is pointing (chin up, chin down,
+// tilted, a three-quarter turn, looking back over the shoulder, a sideways
+// glance) and how close the camera is (close-up, medium, full body, wide).
+// Both axes verified against live output.
+//
+// NEVER add "from behind", a strict side profile, or "running away" to this
+// list. Asked for any of those, the model draws a SECOND child facing away
+// instead of turning the first one around, and the page comes back with a
+// stranger in it. "Looking back over the shoulder toward the viewer" is the
+// safe way to get the same feeling, because the face stays in frame.
 const SHOTS = [
-  'full body from the front, head to toe in the frame, faces clearly visible',
-  'three-quarter view, bodies turned away but faces looking back toward the viewer',
-  'low angle from below, looking up at them, faces tilted toward the viewer',
-  'close-up from the front, heads and shoulders filling the frame',
-  'side profile, facing across the frame', // ANGLED
-  'wide shot, small in the frame with plenty of the setting around them, faces toward the viewer',
-  'high angle looking down from above, faces tilted up toward the viewer',
-  'over-the-shoulder from behind, seeing what they see', // ANGLED
-  'eye-level front view from a short distance, the scene opening out behind them',
-  'off-centre at eye level, facing the viewer, the action filling the rest of the frame',
-  'head turned away, looking off at something out of frame', // ANGLED
-  'medium shot from the front, waist up, faces clearly visible',
-  'framed from the front through a doorway, window or arch',
-  'full body from the side, the whole figure in profile', // ANGLED
-  'medium-wide from the front at eye level, faces clearly visible'
+  'medium shot, waist up, head tilted slightly, face toward the viewer',
+  'close-up, head and shoulders filling the frame, chin up',
+  'full body, head to toe, three-quarter turn with the face toward the viewer',
+  'wide shot with plenty of the setting around them, chin down, looking at what their hands are doing',
+  'medium shot, waist up, glancing sideways without turning the body',
+  'close-up, chin down and head tilted',
+  'full body, head to toe, looking back over the shoulder toward the viewer',
+  'wide shot with the setting around them, chin up, looking upward',
+  'medium shot, three-quarter turn, glancing sideways',
+  'close-up, looking back over the shoulder toward the viewer',
+  'full body, head to toe, chin up',
+  'medium shot, waist up, chin down with the head tilted',
+  'wide shot, three-quarter turn, face toward the viewer',
+  'close-up, chin up and glancing sideways',
+  'medium-wide, face toward the viewer, head tilted'
 ];
 
 function subjectPhrase(count, subjectType) {
@@ -666,6 +668,31 @@ async function waitForImageSlot(paid) {
   }
 }
 
+// The model ignores left and right: four explicit direction prompts came back
+// identical, so asking for it is wasted breath. Flipping the finished page is
+// the only thing that reliably stops every page in a book leaning the same way.
+// Roughly half, decided per page - a coin flip, which is what "roughly" means
+// here; over fifteen pages it lands near enough to half.
+//
+// Safe to do blind because the page has no text in it: BASE_STYLE rules out
+// text and captions, so there is no lettering to come back mirrored. If that
+// ever changes, this has to change with it.
+const MIRROR_CHANCE = 0.5;
+
+async function maybeMirror(b64) {
+  if (Math.random() >= MIRROR_CHANCE) return b64;
+  try {
+    // flop is the horizontal mirror; flip is vertical.
+    const mirrored = await sharp(Buffer.from(b64, 'base64')).flop().png().toBuffer();
+    return mirrored.toString('base64');
+  } catch (err) {
+    // A page that came back fine is worth more than a page that leans the right
+    // way, so a failed flip keeps the original rather than losing the drawing.
+    console.error('Mirror failed, keeping the page as drawn -', err.message);
+    return b64;
+  }
+}
+
 async function renderScene({ buffer, mimetype, filename, prompt, paid }) {
   await waitForImageSlot(paid === true);
   if (!OPENAI_API_KEY) throw new Error('Server is missing its OpenAI API key.');
@@ -688,7 +715,7 @@ async function renderScene({ buffer, mimetype, filename, prompt, paid }) {
   }
   const b64 = data.data && data.data[0] && data.data[0].b64_json;
   if (!b64) throw new Error('No image returned from OpenAI.');
-  return `data:image/png;base64,${b64}`;
+  return `data:image/png;base64,${await maybeMirror(b64)}`;
 }
 
 function dataUrlToBuffer(dataUrl) {
