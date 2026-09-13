@@ -394,16 +394,31 @@ const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only
 
 // Without a camera direction the image model falls back to the same head-on
 // portrait every time, so a whole book came back looking like a page of
-// passport photos. Rotating through these per scene varies the framing.
+// passport photos. buildPrompt walks this list with sceneIndex, and every theme
+// is 15 scenes long, so a book uses each entry once and never repeats a shot.
+//
+// Two rules hold this list together. Only four entries - marked ANGLED - turn
+// the face away from the viewer, because the likeness is what the book is sold
+// on; they sit on pages 5, 8, 11 and 14, away from the free preview and away
+// from the last page. Every other entry still moves the camera off the angle
+// the reference photo was taken at, varying height, distance and composition
+// instead of hiding the face. Keep both rules if you reorder this.
 const SHOTS = [
-  'wide shot, subject small in the frame with plenty of the setting visible',
-  'low angle from below, looking up at the subject',
-  'over-the-shoulder from behind the subject, seeing what they see',
-  'side profile, subject facing across the frame',
-  'medium shot from the front, waist up',
-  'high angle looking down on the scene from above',
-  'three-quarter view with the head turned away from the viewer',
-  'full body from the side, the whole figure in the frame'
+  'medium shot from the front, waist up, faces clearly visible',
+  'close-up from the front, heads and shoulders filling the frame',
+  'full body from the front, head to toe in the frame',
+  'low angle from below, looking up at them, faces tilted toward the viewer',
+  'side profile, facing across the frame', // ANGLED
+  'wide shot, small in the frame with plenty of the setting around them, faces toward the viewer',
+  'high angle looking down from above, faces tilted up toward the viewer',
+  'over-the-shoulder from behind, seeing what they see', // ANGLED
+  'three-quarter view, bodies turned away but faces looking back toward the viewer',
+  'eye-level front view from a short distance, the scene opening out behind them',
+  'head turned away, looking off at something out of frame', // ANGLED
+  'off-centre at eye level, facing the viewer, the action filling the rest of the frame',
+  'framed from the front through a doorway, window or arch',
+  'full body from the side, the whole figure in profile', // ANGLED
+  'medium-wide from the front at eye level, faces clearly visible'
 ];
 
 function subjectPhrase(count, subjectType) {
@@ -813,7 +828,7 @@ setInterval(() => {
     if (live.length === 0) eventHits.delete(ip);
     else eventHits.set(ip, live);
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref();
 
 app.post('/event', async (req, res) => {
   // Analytics must never be able to break a sale, so this answers 204 whatever
@@ -887,7 +902,7 @@ setInterval(() => {
     if (live.length === 0) previewHits.delete(ip);
     else previewHits.set(ip, live);
   }
-}, 15 * 60 * 1000);
+}, 15 * 60 * 1000).unref();
 
 app.post('/convert', upload.single('photo'), async (req, res) => {
   try {
@@ -1003,7 +1018,6 @@ const PORT = process.env.PORT || 3000;
 // Bind the port FIRST. If the database is asleep or unreachable, the service
 // still starts and /health reports the problem, instead of the whole deploy
 // failing because the host never saw a port open.
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
 db.initDb().catch((err) => {
   console.error('Database init failed:', err.message);
@@ -1027,8 +1041,9 @@ async function purgeOldData() {
     console.error('Retention purge failed:', err.message);
   }
 }
-setTimeout(purgeOldData, 60 * 1000);
-setInterval(purgeOldData, 6 * 60 * 60 * 1000);
+// unref'd: janitorial, and must not keep a process alive on its own.
+setTimeout(purgeOldData, 60 * 1000).unref();
+setInterval(purgeOldData, 6 * 60 * 60 * 1000).unref();
 
 // A book is drawn in this process's memory, so a restart - a deploy, a crash,
 // Render moving the instance - used to abandon whatever was mid-render, and
@@ -1061,7 +1076,15 @@ async function resumeUnfinished() {
     sweeping = false;
   }
 }
-// Once shortly after boot (the restart case), then periodically for anything
-// that dies while we are up.
-setTimeout(resumeUnfinished, 20 * 1000);
-setInterval(resumeUnfinished, 60 * 1000);
+// Only when run as the server. Required as a module - by a test, or by
+// scripts/render-test-book.js - this file hands back the prompt and render
+// helpers without opening a port or starting the resume sweeps.
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+  // Once shortly after boot (the restart case), then periodically for anything
+  // that dies while we are up.
+  setTimeout(resumeUnfinished, 20 * 1000);
+  setInterval(resumeUnfinished, 60 * 1000);
+}
+
+module.exports = { app, buildPrompt, renderScene, STORY_SCENES, SHOTS };
