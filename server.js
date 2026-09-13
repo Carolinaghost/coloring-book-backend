@@ -414,6 +414,24 @@ function subjectPhrase(count, subjectType) {
   return singularNoun;
 }
 
+// Scene lines are written with a singular subject ("the child climbs into the
+// fire engine"). For a two- or three-subject book that subject becomes plural,
+// so the verb after it has to drop its third-person -s or the prompt reads
+// "both children climbs into the fire engine". Only the verb directly after the
+// subject is touched: a later clause can belong to something else entirely
+// ("meets a small talking fox who offers to be their guide").
+const IRREGULAR_PLURAL_VERBS = { is: 'are', was: 'were', has: 'have', does: 'do', goes: 'go' };
+
+function pluralizeVerb(word) {
+  if (IRREGULAR_PLURAL_VERBS[word]) return IRREGULAR_PLURAL_VERBS[word];
+  // Participles ("playing") and anything that is not a verb at all ("with",
+  // "and", "mid-jump") carry no -s and need no help.
+  if (!word.endsWith('s') || word.endsWith('ss')) return word;
+  if (word.endsWith('ies') && word.length > 4) return word.slice(0, -3) + 'y'; // carries -> carry
+  if (/(sses|shes|ches|xes|zes)$/.test(word)) return word.slice(0, -2); // washes -> wash
+  return word.slice(0, -1); // climbs -> climb
+}
+
 function consistencyLine(count, subjectType) {
   const possessive = subjectType === 'adult' ? 'person\'s' : 'child\'s';
   if (count > 1) {
@@ -422,6 +440,11 @@ function consistencyLine(count, subjectType) {
   return 'Keep the face, hair and features of ' + subjectPhrase(count, subjectType) + ' recognisable from the reference photo across the whole story. Recognisable means the same likeness, not the same pose: the posture, expression and viewing angle should change from scene to scene.';
 }
 
+// Every line is written for one subject: "the child" followed by a single
+// simple-present verb. buildPrompt swaps in a plural subject and fixes that
+// verb for multi-subject books, so keep new lines in the same shape and put any
+// second action in a participial clause ("..., slowing it down") rather than
+// "and slows it down".
 const STORY_SCENES = {
   'Superhero': [
     'the child discovers a glowing cape in their bedroom',
@@ -429,7 +452,7 @@ const STORY_SCENES = {
     'the child leaps off a rooftop, cape flying, starting to fly',
     'the child soars above city skyscrapers for the first time',
     'the child rescues a kitten stuck in a tall tree',
-    'the child races a speeding runaway train and slows it down',
+    'the child races a speeding runaway train, slowing it down',
     'the child lifts a fallen tree off a road to clear the way',
     'the child faces down a cartoonish storm cloud villain in the sky',
     'the child uses super strength to hold up a collapsing bridge',
@@ -495,8 +518,8 @@ const STORY_SCENES = {
     'the child tries on a firefighter helmet for the first time, grinning',
     'the child slides down the fire station pole',
     'the child polishes the big red fire engine',
-    'the child checks the hose and coils it neatly',
-    'the child climbs into the fire engine and takes the wheel',
+    'the child checks the hose, coiling it neatly',
+    'the child climbs into the fire engine, taking the wheel',
     'the child rides the fire engine with the ladder raised high',
     'the child raises the ladder toward a tall building',
     'the child rescues a kitten from a rooftop',
@@ -515,7 +538,7 @@ const STORY_SCENES = {
     'the child directs traffic at a busy crosswalk',
     'the child helps a family cross the street safely',
     'the child rides a police bicycle through a park',
-    'the child meets a friendly police dog and shakes its paw',
+    'the child meets a friendly police dog, shaking its paw',
     'the child returns a lost teddy bear to a smaller child',
     'the child helps an elderly person carry groceries',
     'the child talks with kids at a school assembly',
@@ -528,7 +551,7 @@ const STORY_SCENES = {
   'Doctor': [
     'the child puts on a white coat and a stethoscope',
     'the child listens to a teddy bear\'s heartbeat with a stethoscope',
-    'the child checks a patient\'s temperature and smiles reassuringly',
+    'the child checks a patient\'s temperature, smiling reassuringly',
     'the child wraps a bandage around a stuffed rabbit\'s paw',
     'the child looks into a microscope in a bright lab',
     'the child reads an X-ray on a light board',
@@ -581,7 +604,11 @@ const STORY_SCENES = {
 function buildPrompt(theme, sceneIndex, childCount, subjectType, notes) {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
   let scene = scenes[sceneIndex] || scenes[0];
-  scene = scene.replace(/\bthe child\b/g, subjectPhrase(childCount, subjectType));
+  const subject = subjectPhrase(childCount, subjectType);
+  if (childCount > 1) {
+    scene = scene.replace(/\bthe child\b(\s+)([a-z]+)/g, (match, gap, word) => subject + gap + pluralizeVerb(word));
+  }
+  scene = scene.replace(/\bthe child\b/g, subject);
   let prompt = `${BASE_STYLE} ${consistencyLine(childCount, subjectType)} Scene: ${scene}.`;
   prompt += ` Camera: ${SHOTS[sceneIndex % SHOTS.length]}.`;
   if (notes && notes.trim()) {
