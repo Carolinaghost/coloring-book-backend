@@ -4,7 +4,8 @@
   "description": "Backend server that converts uploaded photos into coloring book pages using OpenAI's image API.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node test/funnel.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
