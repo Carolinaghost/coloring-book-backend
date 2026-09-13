@@ -392,6 +392,20 @@ if (!OPENAI_API_KEY) {
 
 const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions, simple line art suitable for a child to color in.';
 
+// Without a camera direction the image model falls back to the same head-on
+// portrait every time, so a whole book came back looking like a page of
+// passport photos. Rotating through these per scene varies the framing.
+const SHOTS = [
+  'wide shot, subject small in the frame with plenty of the setting visible',
+  'low angle from below, looking up at the subject',
+  'over-the-shoulder from behind the subject, seeing what they see',
+  'side profile, subject facing across the frame',
+  'medium shot from the front, waist up',
+  'high angle looking down on the scene from above',
+  'three-quarter view with the head turned away from the viewer',
+  'full body from the side, the whole figure in the frame'
+];
+
 function subjectPhrase(count, subjectType) {
   const noun = subjectType === 'adult' ? 'people' : 'children';
   const singularNoun = subjectType === 'adult' ? 'the person' : 'the child';
@@ -403,9 +417,9 @@ function subjectPhrase(count, subjectType) {
 function consistencyLine(count, subjectType) {
   const possessive = subjectType === 'adult' ? 'person\'s' : 'child\'s';
   if (count > 1) {
-    return 'The reference photo shows ' + subjectPhrase(count, subjectType) + '. Keep each ' + possessive + ' individual likeness consistent across every scene, and show them together, interacting, in every scene.';
+    return 'The reference photo shows ' + subjectPhrase(count, subjectType) + '. Keep each ' + possessive + ' face, hair and features recognisable across every scene. Recognisable means the same likeness, not the same pose: vary their posture, expression and viewing angle from scene to scene. Show them together, interacting, in every scene.';
   }
-  return 'Keep the likeness of ' + subjectPhrase(count, subjectType) + ' from the reference photo consistent across the whole story.';
+  return 'Keep the face, hair and features of ' + subjectPhrase(count, subjectType) + ' recognisable from the reference photo across the whole story. Recognisable means the same likeness, not the same pose: the posture, expression and viewing angle should change from scene to scene.';
 }
 
 const STORY_SCENES = {
@@ -569,6 +583,7 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes) {
   let scene = scenes[sceneIndex] || scenes[0];
   scene = scene.replace(/\bthe child\b/g, subjectPhrase(childCount, subjectType));
   let prompt = `${BASE_STYLE} ${consistencyLine(childCount, subjectType)} Scene: ${scene}.`;
+  prompt += ` Camera: ${SHOTS[sceneIndex % SHOTS.length]}.`;
   if (notes && notes.trim()) {
     prompt += ` Also incorporate this detail where it fits naturally: ${notes.trim()}.`;
   }
