@@ -2,11 +2,20 @@
 // Renders ONE scene several different ways so you can see which prompt shape
 // actually breaks the model off the reference photo's camera angle.
 //
-//   OPENAI_API_KEY=sk-... node scripts/try-prompts.js --photo ./me.jpg --subject adult --kids 1
+//   OPENAI_API_KEY=sk-... node scripts/try-prompts.js --photo ./me.jpg --subject adult
 //
-// Writes variant-<name>.png plus variants.txt into --out (default ./prompt-test)
-// and prints what each one asked for. One image per variant, so a full run is
-// five image calls; --only <name> renders a single one.
+// Several people, each run on their own - one person per photo, never combined
+// into a group scene. Pass a folder, or a comma-separated list:
+//
+//   node scripts/try-prompts.js --photos ./photos/kids --subject kid
+//   node scripts/try-prompts.js --photos ./mum.jpg,./dad.jpg --subject adult
+//
+// Each photo gets its own folder of results under --out (default ./prompt-test)
+// alongside variants.txt, which records what every variant asked for.
+//
+// Cost adds up multiplicatively: five variants across six people is thirty
+// image calls. Settle the variant on ONE photo first, then re-run the winner
+// across everyone with --only <name>, which is one image per person.
 //
 // This file deliberately builds its own prompts and calls instead of reusing
 // buildPrompt: it exists to test shapes that are NOT in production yet. When a
@@ -28,6 +37,26 @@ function parseArgs(argv) {
     args[key] = next && !next.startsWith('--') ? (i++, next) : 'true';
   }
   return args;
+}
+
+const PHOTO_EXTS = ['.jpg', '.jpeg', '.png', '.webp'];
+
+// One entry per person. A folder is read as "everyone in here, separately";
+// nobody is ever merged into a single group prompt.
+function collectPhotos(value) {
+  if (!value || value === 'true') return [];
+  const out = [];
+  value.split(',').map((v) => v.trim()).filter(Boolean).forEach(function (entry) {
+    if (fs.existsSync(entry) && fs.statSync(entry).isDirectory()) {
+      fs.readdirSync(entry)
+        .filter((f) => PHOTO_EXTS.includes(path.extname(f).toLowerCase()))
+        .sort()
+        .forEach((f) => out.push(path.join(entry, f)));
+    } else {
+      out.push(entry);
+    }
+  });
+  return out;
 }
 
 const STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions, simple line art suitable for a child to color in.';
@@ -121,7 +150,8 @@ async function renderGenerate(prompt) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (!args.photo) throw new Error('Pass a reference photo: --photo ./me.jpg');
+  const photos = collectPhotos(args.photos || args.photo);
+  if (!photos.length) throw new Error('Pass a reference photo: --photo ./me.jpg, or --photos ./folder');
   if (!KEY) throw new Error('Set OPENAI_API_KEY first.');
 
   const theme = args.theme || 'Family Keepsake';
@@ -139,39 +169,64 @@ async function main() {
   let scene = (STORY_SCENES[theme][sceneIndex] || STORY_SCENES[theme][0]);
   scene = scene.replace(/^the child\s+/, '').replace(/\bthe child\b/g, subject);
 
-  const buffer = fs.readFileSync(args.photo);
-  const mimetype = path.extname(args.photo).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
   fs.mkdirSync(outDir, { recursive: true });
 
   let list = variants(scene, subject);
   if (args.only && args.only !== 'true') list = list.filter((v) => v.name === args.only);
   if (!list.length) throw new Error('No variant matched --only.');
 
-  console.log(`Scene: ${scene}\nWanted camera: ${CAMERA}\n${list.length} variant(s) -> ${outDir}\n`);
+  console.log(`Scene: ${scene}`);
+  console.log(`Wanted camera: ${CAMERA}`);
+  console.log(`${photos.length} photo(s), each run on its own, ${list.length} variant(s) each`);
+  console.log(`${photos.length * list.length} image call(s) -> ${outDir}\n`);
 
   const log = [];
-  for (const v of list) {
+  let failed = 0;
+  for (const photo of photos) {
+    // Each person is a separate run against their own photo. Nothing is shared
+    // between them, so one bad photo cannot spoil anyone else's results.
+    const who = path.basename(photo, path.extname(photo));
+    const personDir = photos.length > 1 ? path.join(outDir, who) : outDir;
+    fs.mkdirSync(personDir, { recursive: true });
+    let buffer;
     try {
-      let b64;
-      let prompt = v.body;
-      if (v.describe) {
-        const description = await describePerson(buffer, mimetype, describeModel);
-        prompt = `${STYLE} A coloring book page showing ${description} The scene: ${subject} ${scene}. Camera: ${CAMERA}.`;
-        console.log(`${v.name}: description -> ${description.replace(/\s+/g, ' ').slice(0, 120)}...`);
-        b64 = await renderGenerate(prompt);
-      } else {
-        b64 = await renderEdit(buffer, mimetype, path.basename(args.photo), prompt, v.fidelity);
-      }
-      fs.writeFileSync(path.join(outDir, `variant-${v.name}.png`), Buffer.from(b64, 'base64'));
-      log.push(`--- ${v.name} (${v.note}) ---\n${prompt}\n`);
-      console.log(`${v.name.padEnd(26)} ok`);
+      buffer = fs.readFileSync(photo);
     } catch (err) {
-      log.push(`--- ${v.name} (${v.note}) FAILED: ${err.message} ---\n${v.body || ''}\n`);
-      console.error(`${v.name.padEnd(26)} FAIL ${err.message}`);
+      failed += list.length;
+      console.error(`${who.padEnd(18)} SKIPPED  ${err.message}`);
+      continue;
+    }
+    const mimetype = path.extname(photo).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
+    console.log(`${who}:`);
+
+    for (const v of list) {
+      try {
+        let b64;
+        let prompt = v.body;
+        if (v.describe) {
+          const description = await describePerson(buffer, mimetype, describeModel);
+          prompt = `${STYLE} A coloring book page showing ${description} The scene: ${subject} ${scene}. Camera: ${CAMERA}.`;
+          console.log(`  ${v.name}: description -> ${description.replace(/\s+/g, ' ').slice(0, 110)}...`);
+          b64 = await renderGenerate(prompt);
+        } else {
+          b64 = await renderEdit(buffer, mimetype, path.basename(photo), prompt, v.fidelity);
+        }
+        fs.writeFileSync(path.join(personDir, `variant-${v.name}.png`), Buffer.from(b64, 'base64'));
+        log.push(`--- ${who} / ${v.name} (${v.note}) ---\n${prompt}\n`);
+        console.log(`  ${v.name.padEnd(26)} ok`);
+      } catch (err) {
+        failed++;
+        log.push(`--- ${who} / ${v.name} (${v.note}) FAILED: ${err.message} ---\n${v.body || ''}\n`);
+        console.error(`  ${v.name.padEnd(26)} FAIL ${err.message}`);
+      }
     }
   }
+
   fs.writeFileSync(path.join(outDir, 'variants.txt'), log.join('\n'));
-  console.log(`\nWritten to ${outDir}. Compare each against the photo: the one that is NOT a head-on portrait wins.`);
+  const total = photos.length * list.length;
+  console.log(`\n${total - failed}/${total} image(s) written to ${outDir}.`);
+  console.log('Compare each against that person\'s photo: the one that is NOT a head-on portrait wins.');
+  if (failed) process.exitCode = 1;
 }
 
 main().catch((err) => { console.error(err.message); process.exit(1); });
