@@ -151,9 +151,10 @@ async function main() {
   // -------------------------------------------------------------------------
   console.log('\nbuyers with no visitor id are counted separately');
   // -------------------------------------------------------------------------
-  // The regression this suite exists for. An ad blocker, or reaching checkout
-  // before the tracking snippet runs, leaves visitor empty. Counting those
-  // DISTINCT made every anonymous buyer look like the same person.
+  // The regression this suite exists for. The site's page always sets a visitor
+  // id, but a stale cached page - or anything hitting the API that is not that
+  // page - leaves it empty. Counting those DISTINCT made every anonymous buyer
+  // look like the same person.
   const anon = `${RUN}-facebook`;
   const beforeAnon = await sourceRow(anon);
   for (let i = 0; i < 3; i++) {

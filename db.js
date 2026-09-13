@@ -548,15 +548,16 @@ function cleanTag(value) {
 
 // Counts people, not rows.
 //
-// The visitor id is the best key we have, but it is not always there: an ad
-// blocker can stop the snippet that makes it, and someone can reach checkout
-// before it ever runs. Those rows arrive with an empty visitor, and counting
-// them DISTINCT folded every anonymous buyer into a single person - three real
-// sales from one channel showed up as one, which is exactly the number used to
-// decide whether that channel is worth paying for.
+// The visitor id is the best key we have. The site's own page always sets one,
+// so in ordinary traffic it is there - but the server cannot assume that. A page
+// cached from before the counters existed, and anything reaching the API that is
+// not that page, sends an empty visitor. Counting those DISTINCT folded every one
+// of them into a single person: several real sales from one channel reporting as
+// one, which is the number used to decide whether that channel is worth paying
+// for.
 //
 // So fall back to the order, and then to the event itself. That keeps separate
-// buyers separate, and still folds Stripe's webhook retries together, because a
+// buyers separate, and it also folds Stripe's webhook retries together, because a
 // retry repeats the same order.
 const COUNT_KEY_SQL = "COALESCE(NULLIF(visitor, ''), 'order:' || order_id, 'ev:' || id)";
 
