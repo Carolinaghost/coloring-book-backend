@@ -17,6 +17,9 @@
 // image calls. Settle the variant on ONE photo first, then re-run the winner
 // across everyone with --only <name>, which is one image per person.
 //
+// --notes adds a detail to every variant, the same way the customer's own note
+// reaches a real book: --notes "she loves her dog, include her dog".
+//
 // This file deliberately builds its own prompts and calls instead of reusing
 // buildPrompt: it exists to test shapes that are NOT in production yet. When a
 // variant wins, its shape moves into server.js and this script goes away.
@@ -65,33 +68,34 @@ const STYLE = 'Black and white coloring book page, clean bold outlines only, no 
 // cannot be: a selfie is never a full figure seen from below.
 const CAMERA = 'full body, head to toe in the frame, seen from slightly below';
 
-function variants(scene, subject) {
+function variants(scene, subject, notes) {
+  const extra = notes ? ` Also incorporate this detail where it fits naturally: ${notes}.` : '';
   return [
     {
       // What production sends today: style first, camera last, and the photo
       // handled with a list of don'ts.
       name: 'a-current',
       note: 'current production shape (style first, negative instructions)',
-      body: `${STYLE} Keep the face, hair and features of ${subject} recognisable from the reference photo. Use the reference photo only for the faces, hair and features. Do not copy its pose, framing, background or camera angle: this page is a new drawing of the same people somewhere else, not the photo traced over. Scene: ${scene}. Camera: ${CAMERA}.`
+      body: `${STYLE} Keep the face, hair and features of ${subject} recognisable from the reference photo. Use the reference photo only for the faces, hair and features. Do not copy its pose, framing, background or camera angle: this page is a new drawing of the same people somewhere else, not the photo traced over. Scene: ${scene}. Camera: ${CAMERA}.${extra}`
     },
     {
       // Same words, different order: what to draw comes first.
       name: 'b-scene-first',
       note: 'scene and camera first, style constraints after',
-      body: `Draw ${subject} ${scene}. ${CAMERA[0].toUpperCase()}${CAMERA.slice(1)}. ${STYLE} The attached photo is a likeness reference for the face only.`
+      body: `Draw ${subject} ${scene}. ${CAMERA[0].toUpperCase()}${CAMERA.slice(1)}. ${STYLE} The attached photo is a likeness reference for the face only.${extra}`
     },
     {
       // Says affirmatively what the finished page IS, and names the photo's
       // role instead of forbidding things.
       name: 'c-identity-ref',
       note: 'affirmative target description, photo named as identity reference',
-      body: `A new coloring book page showing ${subject} ${scene}. The whole figure is in the frame, head to toe, drawn from a low camera looking up, in a setting drawn from scratch. The attached photo is an identity reference: copy the face, hair and glasses from it so the person is recognisable, and invent everything else - pose, body, clothing, background, camera position. ${STYLE}`
+      body: `A new coloring book page showing ${subject} ${scene}. The whole figure is in the frame, head to toe, drawn from a low camera looking up, in a setting drawn from scratch. The attached photo is an identity reference: copy the face, hair and glasses from it so the person is recognisable, and invent everything else - pose, body, clothing, background, camera position. ${STYLE}${extra}`
     },
     {
       name: 'd-identity-ref-fidelity',
       note: 'same as c, plus input_fidelity: high',
       fidelity: 'high',
-      body: `A new coloring book page showing ${subject} ${scene}. The whole figure is in the frame, head to toe, drawn from a low camera looking up, in a setting drawn from scratch. The attached photo is an identity reference: copy the face, hair and glasses from it so the person is recognisable, and invent everything else - pose, body, clothing, background, camera position. ${STYLE}`
+      body: `A new coloring book page showing ${subject} ${scene}. The whole figure is in the frame, head to toe, drawn from a low camera looking up, in a setting drawn from scratch. The attached photo is an identity reference: copy the face, hair and glasses from it so the person is recognisable, and invent everything else - pose, body, clothing, background, camera position. ${STYLE}${extra}`
     },
     {
       // No source image at all. A vision model writes a likeness description
@@ -158,6 +162,7 @@ async function main() {
   if (!STORY_SCENES[theme]) throw new Error(`Unknown theme "${theme}". Try: ${Object.keys(STORY_SCENES).join(', ')}`);
   const sceneIndex = parseInt(args.scene, 10) || 0;
   const describeModel = args.describeModel || 'gpt-4o';
+  const notes = args.notes && args.notes !== 'true' ? args.notes.trim() : '';
   const outDir = args.out || './prompt-test';
 
   const count = Math.min(3, Math.max(1, parseInt(args.kids, 10) || 1));
@@ -171,7 +176,7 @@ async function main() {
 
   fs.mkdirSync(outDir, { recursive: true });
 
-  let list = variants(scene, subject);
+  let list = variants(scene, subject, notes);
   if (args.only && args.only !== 'true') list = list.filter((v) => v.name === args.only);
   if (!list.length) throw new Error('No variant matched --only.');
 
@@ -205,7 +210,8 @@ async function main() {
         let prompt = v.body;
         if (v.describe) {
           const description = await describePerson(buffer, mimetype, describeModel);
-          prompt = `${STYLE} A coloring book page showing ${description} The scene: ${subject} ${scene}. Camera: ${CAMERA}.`;
+          prompt = `${STYLE} A coloring book page showing ${description} The scene: ${subject} ${scene}. Camera: ${CAMERA}.`
+          + (notes ? ` Also incorporate this detail where it fits naturally: ${notes}.` : '');
           console.log(`  ${v.name}: description -> ${description.replace(/\s+/g, ' ').slice(0, 110)}...`);
           b64 = await renderGenerate(prompt);
         } else {
