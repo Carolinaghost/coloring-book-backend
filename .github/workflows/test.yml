@@ -1,0 +1,24 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Runs against the in-memory store: no database, no secrets, and none of
+      # the tests that delete rows are skipped. The Postgres path is covered by
+      # running the same suite locally with ALLOW_DB_TESTS=1.
+      - run: npm test

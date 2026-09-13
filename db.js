@@ -17,6 +17,7 @@ let pool = null;
 let memoryOrders = [];
 let memoryEvents = [];
 let nextMemoryId = 1;
+let nextMemoryEventId = 1;
 
 if (usingPostgres) {
   pool = new Pool({
@@ -545,6 +546,25 @@ function cleanTag(value) {
   return String(value || '').trim().toLowerCase().slice(0, 80);
 }
 
+// Counts people, not rows.
+//
+// The visitor id is the best key we have. The site's own page always sets one,
+// so in ordinary traffic it is there - but the server cannot assume that. A page
+// cached from before the counters existed, and anything reaching the API that is
+// not that page, sends an empty visitor. Counting those DISTINCT folded every one
+// of them into a single person: several real sales from one channel reporting as
+// one, which is the number used to decide whether that channel is worth paying
+// for.
+//
+// So fall back to the order, and then to the event itself. That keeps separate
+// buyers separate, and it also folds Stripe's webhook retries together, because a
+// retry repeats the same order.
+const COUNT_KEY_SQL = "COALESCE(NULLIF(visitor, ''), 'order:' || order_id, 'ev:' || id)";
+
+function countKey(e) {
+  return e.visitor || (e.orderId ? `order:${e.orderId}` : `ev:${e.id}`);
+}
+
 async function recordEvent({ type, visitor, source, campaign, orderId }) {
   if (!EVENT_TYPES.includes(type)) return false;
   const row = {
@@ -556,7 +576,7 @@ async function recordEvent({ type, visitor, source, campaign, orderId }) {
   };
 
   if (!usingPostgres) {
-    memoryEvents.push({ ...row, createdAt: new Date() });
+    memoryEvents.push({ ...row, id: nextMemoryEventId++, createdAt: new Date() });
     return true;
   }
   await pool.query(
@@ -581,14 +601,14 @@ async function funnelStats(days = 7) {
     const rows = withinDays(memoryEvents, window);
     return EVENT_TYPES.map((type) => {
       const of = rows.filter((e) => e.type === type);
-      return { type, visitors: new Set(of.map((e) => e.visitor)).size, hits: of.length };
+      return { type, visitors: new Set(of.map(countKey)).size, hits: of.length };
     });
   }
 
   const { rows } = await pool.query(
     `SELECT type,
-            COUNT(DISTINCT visitor)::int AS visitors,
-            COUNT(*)::int                AS hits
+            COUNT(DISTINCT ${COUNT_KEY_SQL})::int AS visitors,
+            COUNT(*)::int                         AS hits
        FROM events
       WHERE created_at > NOW() - ($1 * INTERVAL '1 day')
       GROUP BY type`,
@@ -613,8 +633,8 @@ async function sourceStats(days = 7) {
     for (const e of rows) {
       if (!map.has(e.source)) map.set(e.source, { source: e.source, landed: new Set(), paid: new Set() });
       const bucket = map.get(e.source);
-      if (e.type === 'landed') bucket.landed.add(e.visitor);
-      if (e.type === 'paid') bucket.paid.add(e.visitor);
+      if (e.type === 'landed') bucket.landed.add(countKey(e));
+      if (e.type === 'paid') bucket.paid.add(countKey(e));
     }
     return [...map.values()]
       .map((b) => ({ source: b.source, visitors: b.landed.size, paid: b.paid.size }))
@@ -624,8 +644,8 @@ async function sourceStats(days = 7) {
 
   const { rows } = await pool.query(
     `SELECT source,
-            COUNT(DISTINCT visitor) FILTER (WHERE type = 'landed')::int AS visitors,
-            COUNT(DISTINCT visitor) FILTER (WHERE type = 'paid')::int   AS paid
+            COUNT(DISTINCT ${COUNT_KEY_SQL}) FILTER (WHERE type = 'landed')::int AS visitors,
+            COUNT(DISTINCT ${COUNT_KEY_SQL}) FILTER (WHERE type = 'paid')::int   AS paid
        FROM events
       WHERE created_at > NOW() - ($1 * INTERVAL '1 day')
       GROUP BY source
