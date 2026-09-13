@@ -15,6 +15,7 @@ const usingPostgres = Boolean(DATABASE_URL);
 
 let pool = null;
 let memoryOrders = [];
+let memoryEvents = [];
 let nextMemoryId = 1;
 
 if (usingPostgres) {
@@ -75,6 +76,26 @@ const CREATE_PAGES_SQL = `
   );
 `;
 
+// Anonymous funnel counters. No IP address, no user agent, no name or email —
+// just which step of the flow happened, a random per-page-load id so the same
+// visitor is not counted twice, and where they came from. Nothing here can be
+// traced back to a person, which is why it needs no cookie banner.
+const CREATE_EVENTS_SQL = `
+  CREATE TABLE IF NOT EXISTS events (
+    id         BIGSERIAL   PRIMARY KEY,
+    type       TEXT        NOT NULL,
+    visitor    TEXT        NOT NULL DEFAULT '',
+    source     TEXT        NOT NULL DEFAULT '',
+    campaign   TEXT        NOT NULL DEFAULT '',
+    order_id   INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`;
+
+const CREATE_EVENTS_INDEX_SQL = `
+  CREATE INDEX IF NOT EXISTS events_created_at_idx ON events (created_at DESC);
+`;
+
 // Columns added after the first release. Existing deployments already have an
 // orders table, so CREATE TABLE IF NOT EXISTS alone would silently skip these.
 const MIGRATIONS = [
@@ -87,7 +108,10 @@ const MIGRATIONS = [
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS photo TEXT",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS generation_status TEXT NOT NULL DEFAULT 'idle'",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS subject_type TEXT NOT NULL DEFAULT 'kid'",
-  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS render_attempts INTEGER NOT NULL DEFAULT 0"
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS render_attempts INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS visitor TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''"
 ];
 
 const CREATE_INDEX_SQL = `
@@ -113,6 +137,8 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_INDEX_SQL);
     for (const sql of MIGRATIONS) await pool.query(sql);
     await pool.query(CREATE_PAGES_SQL);
+    await pool.query(CREATE_EVENTS_SQL);
+    await pool.query(CREATE_EVENTS_INDEX_SQL);
     ready = true;
     lastError = null;
     console.log('Connected to Postgres. Orders table is ready.');
@@ -153,6 +179,9 @@ function rowToOrder(row) {
     product: row.product,
     generationStatus: row.generation_status || 'idle',
     subjectType: row.subject_type || 'kid',
+    visitor: row.visitor || '',
+    source: row.source || '',
+    campaign: row.campaign || '',
     submittedAt: new Date(row.submitted_at).toISOString()
   };
 }
@@ -175,8 +204,8 @@ async function saveOrder(order) {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token, photo, subject_type)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token, photo, subject_type, visitor, source, campaign)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      RETURNING *`,
     [
       order.childName,
@@ -188,7 +217,10 @@ async function saveOrder(order) {
       order.pageCount,
       accessToken,
       order.photo || null,
-      order.subjectType === 'adult' ? 'adult' : 'kid'
+      order.subjectType === 'adult' ? 'adult' : 'kid',
+      order.visitor || '',
+      order.source || '',
+      order.campaign || ''
     ]
   );
   const saved = rowToOrder(rows[0]);
@@ -489,6 +521,134 @@ async function countOrders() {
   return rows[0].count;
 }
 
+
+// ---------------------------------------------------------------------------
+// Funnel counters
+// ---------------------------------------------------------------------------
+// Everything below deals in counts only. A "visitor" is a random id the page
+// makes up on load and keeps in a variable — it is never written to the
+// browser, never reused across visits, and cannot identify anyone. It exists
+// so that one person clicking twice is not counted as two people.
+
+// Event names the rest of the app is allowed to record. Anything else is
+// dropped, so a stray call from the browser can never pollute the numbers.
+const EVENT_TYPES = [
+  'landed',          // the page opened
+  'uploaded',        // a photo was chosen
+  'preview_started', // "See my free preview" was clicked
+  'preview_shown',   // at least one page actually came back
+  'unlock_clicked',  // checkout was started
+  'paid'             // Stripe confirmed the payment (recorded server-side only)
+];
+
+function cleanTag(value) {
+  return String(value || '').trim().toLowerCase().slice(0, 80);
+}
+
+async function recordEvent({ type, visitor, source, campaign, orderId }) {
+  if (!EVENT_TYPES.includes(type)) return false;
+  const row = {
+    type,
+    visitor: String(visitor || '').slice(0, 64),
+    source: cleanTag(source) || 'direct',
+    campaign: cleanTag(campaign),
+    orderId: orderId ? Number(orderId) : null
+  };
+
+  if (!usingPostgres) {
+    memoryEvents.push({ ...row, createdAt: new Date() });
+    return true;
+  }
+  await pool.query(
+    'INSERT INTO events (type, visitor, source, campaign, order_id) VALUES ($1, $2, $3, $4, $5)',
+    [row.type, row.visitor, row.source, row.campaign, row.orderId]
+  );
+  return true;
+}
+
+function withinDays(rows, days) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  return rows.filter((e) => e.createdAt.getTime() >= cutoff);
+}
+
+// One row per funnel step, in flow order, so the drop-off is readable top to
+// bottom. `visitors` counts people; `hits` counts clicks, and a gap between
+// the two usually means someone retried.
+async function funnelStats(days = 7) {
+  const window = Math.min(Math.max(Number(days) || 7, 1), 365);
+
+  if (!usingPostgres) {
+    const rows = withinDays(memoryEvents, window);
+    return EVENT_TYPES.map((type) => {
+      const of = rows.filter((e) => e.type === type);
+      return { type, visitors: new Set(of.map((e) => e.visitor)).size, hits: of.length };
+    });
+  }
+
+  const { rows } = await pool.query(
+    `SELECT type,
+            COUNT(DISTINCT visitor)::int AS visitors,
+            COUNT(*)::int                AS hits
+       FROM events
+      WHERE created_at > NOW() - ($1 * INTERVAL '1 day')
+      GROUP BY type`,
+    [window]
+  );
+  const byType = new Map(rows.map((r) => [r.type, r]));
+  return EVENT_TYPES.map((type) => ({
+    type,
+    visitors: byType.get(type) ? byType.get(type).visitors : 0,
+    hits: byType.get(type) ? byType.get(type).hits : 0
+  }));
+}
+
+// Where the traffic came from, and how much of it actually bought. This is the
+// number that decides whether a marketing channel is worth paying for.
+async function sourceStats(days = 7) {
+  const window = Math.min(Math.max(Number(days) || 7, 1), 365);
+
+  if (!usingPostgres) {
+    const rows = withinDays(memoryEvents, window);
+    const map = new Map();
+    for (const e of rows) {
+      if (!map.has(e.source)) map.set(e.source, { source: e.source, landed: new Set(), paid: new Set() });
+      const bucket = map.get(e.source);
+      if (e.type === 'landed') bucket.landed.add(e.visitor);
+      if (e.type === 'paid') bucket.paid.add(e.visitor);
+    }
+    return [...map.values()]
+      .map((b) => ({ source: b.source, visitors: b.landed.size, paid: b.paid.size }))
+      .sort((a, b) => b.visitors - a.visitors || b.paid - a.paid)
+      .slice(0, 25);
+  }
+
+  const { rows } = await pool.query(
+    `SELECT source,
+            COUNT(DISTINCT visitor) FILTER (WHERE type = 'landed')::int AS visitors,
+            COUNT(DISTINCT visitor) FILTER (WHERE type = 'paid')::int   AS paid
+       FROM events
+      WHERE created_at > NOW() - ($1 * INTERVAL '1 day')
+      GROUP BY source
+      ORDER BY visitors DESC, paid DESC
+      LIMIT 25`,
+    [window]
+  );
+  return rows;
+}
+
+// Counters are not worth keeping forever. Same idea as purgeOldOrders.
+async function purgeOldEvents(days) {
+  const window = Number(days) > 0 ? Number(days) : 180;
+  if (!usingPostgres) {
+    const before = memoryEvents.length;
+    memoryEvents = withinDays(memoryEvents, window);
+    return before - memoryEvents.length;
+  }
+  const { rowCount } = await pool.query(
+    "DELETE FROM events WHERE created_at < NOW() - ($1 * INTERVAL '1 day')", [window]);
+  return rowCount;
+}
+
 module.exports = {
   usingPostgres,
   status,
@@ -512,5 +672,9 @@ module.exports = {
   listOrders,
   getOrder,
   updateOrderStatus,
-  countOrders
+  countOrders,
+  recordEvent,
+  funnelStats,
+  sourceStats,
+  purgeOldEvents
 };
