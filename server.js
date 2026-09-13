@@ -5,6 +5,8 @@ const multer = require('multer');
 const cors = require('cors');
 const db = require('./db');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const mailer = require('./mailer');
 
 const app = express();
@@ -1034,6 +1036,36 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Sample pages for the site
+// ---------------------------------------------------------------------------
+// Finished pages from books we rendered ourselves, served so the site can
+// scatter them around its "this is what you get" block. They are AI-generated
+// stand-ins, not customer work - keep it that way unless a customer puts it in
+// writing.
+//
+// Read once at boot rather than per request: the folder only changes when we
+// deploy, and this route is hit by every visitor.
+const SAMPLES_DIR = path.join(__dirname, 'public', 'samples');
+const SAMPLE_PAGES = (() => {
+  try {
+    return fs.readdirSync(SAMPLES_DIR).filter((f) => f.endsWith('.webp')).sort();
+  } catch (err) {
+    // No folder is not a broken server - the site just shows its block bare.
+    console.warn('No sample pages found:', err.message);
+    return [];
+  }
+})();
+
+app.get('/samples.json', (req, res) => {
+  res.json({ base: '/samples/', pages: SAMPLE_PAGES });
+});
+
+// Content-hashed they are not, but the names are stable and the files only
+// change on deploy, so a long cache is safe and saves the bandwidth.
+app.use('/samples', express.static(SAMPLES_DIR, { maxAge: '30d', immutable: true }));
+app.use('/embed', express.static(path.join(__dirname, 'public', 'embed'), { maxAge: '1h' }));
+
 app.get('/', (req, res) => {
   res.send('Coloring book conversion server is running.');
 });
@@ -1124,4 +1156,4 @@ if (require.main === module) {
   setInterval(resumeUnfinished, 60 * 1000);
 }
 
-module.exports = { app, buildPrompt, renderScene, STORY_SCENES, SHOTS, BASE_STYLE };
+module.exports = { app, buildPrompt, renderScene, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
