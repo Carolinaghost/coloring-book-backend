@@ -97,6 +97,19 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
       const order = await db.markPaid(session.id, session.amount_total);
       console.log(order ? `Order ${order.id} marked paid.` : `No order for session ${session.id}.`);
 
+      // Counted here rather than in the browser: this is the only place a sale
+      // is certain, and it still lands even if the customer closes the tab
+      // before Stripe redirects them back.
+      if (order) {
+        db.recordEvent({
+          type: 'paid',
+          visitor: order.visitor,
+          source: order.source,
+          campaign: order.campaign,
+          orderId: order.id
+        }).catch((err) => console.error('Could not record paid event:', err.message));
+      }
+
       // Start drawing the book on the server, in the background. We deliberately
       // do NOT await it: Stripe times out webhooks in seconds, and a book takes
       // minutes. The email goes out from renderBook once pages actually exist,
@@ -145,7 +158,12 @@ app.post('/orders', async (req, res) => {
       pageCount: parseInt(pageCount, 10) || 0,
       // kept so the server can draw the book after payment without the browser
       photo: typeof req.body.photo === 'string' ? req.body.photo : null,
-      subjectType: req.body.subjectType === 'adult' ? 'adult' : 'kid'
+      subjectType: req.body.subjectType === 'adult' ? 'adult' : 'kid',
+      // Remembered so the Stripe webhook can credit the sale to whatever
+      // brought this person here, minutes later and on a different request.
+      visitor: String(req.body.visitor || '').slice(0, 64),
+      source: String(req.body.source || '').slice(0, 80),
+      campaign: String(req.body.campaign || '').slice(0, 80)
     });
     // accessToken is returned exactly once, here. The browser must keep it;
     // it is what proves ownership when unlocking or re-downloading the book.
@@ -724,6 +742,69 @@ async function renderBook(orderId) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Funnel counters
+// ---------------------------------------------------------------------------
+// The page posts one of these at each step so we can see where people stop.
+// Nothing identifying is stored - see the notes on the events table in db.js.
+// The browser is not trusted here: unknown event names are ignored, and a
+// single address can only add so many before we stop listening.
+const EVENTS_PER_IP_PER_MIN = parseInt(process.env.EVENTS_PER_IP_PER_MIN, 10) || 60;
+const eventHits = new Map();
+
+function takeEventSlot(ip) {
+  const now = Date.now();
+  const seen = (eventHits.get(ip) || []).filter((t) => now - t < 60000);
+  if (seen.length >= EVENTS_PER_IP_PER_MIN) {
+    eventHits.set(ip, seen);
+    return false;
+  }
+  seen.push(now);
+  eventHits.set(ip, seen);
+  return true;
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - 60000;
+  for (const [ip, times] of eventHits) {
+    const live = times.filter((t) => t > cutoff);
+    if (live.length === 0) eventHits.delete(ip);
+    else eventHits.set(ip, live);
+  }
+}, 5 * 60 * 1000);
+
+app.post('/event', async (req, res) => {
+  // Analytics must never be able to break a sale, so this answers 204 whatever
+  // happens and the page never waits on it.
+  res.status(204).end();
+  try {
+    if (!takeEventSlot(req.ip || 'unknown')) return;
+    // 'paid' is recorded by the Stripe webhook alone. Accepting it here would
+    // let anyone inflate the only number that matters.
+    if (req.body && req.body.type === 'paid') return;
+    await db.recordEvent({
+      type: String((req.body && req.body.type) || ''),
+      visitor: (req.body && req.body.visitor) || '',
+      source: (req.body && req.body.source) || '',
+      campaign: (req.body && req.body.campaign) || ''
+    });
+  } catch (err) {
+    console.error('Could not record event:', err.message);
+  }
+});
+
+app.get('/stats', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 365);
+    const [funnel, sources] = await Promise.all([db.funnelStats(days), db.sourceStats(days)]);
+    res.json({ days, funnel, sources });
+  } catch (err) {
+    console.error('Failed to load stats:', err);
+    res.status(500).json({ error: 'Could not load stats.' });
+  }
+});
+
 app.get('/story-length', (req, res) => {
   const theme = req.query.theme || 'Portrait';
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
@@ -891,10 +972,15 @@ db.initDb().catch((err) => {
 // itself goes much sooner - as soon as the book is drawn - so this is the
 // backstop for the rest, and for orders that never finished at all.
 const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || process.env.PHOTO_RETENTION_DAYS, 10) || 30;
+// Counters hold no personal data, so they can outlive the orders they came
+// from - long enough to compare this month against last.
+const EVENT_RETENTION_DAYS = parseInt(process.env.EVENT_RETENTION_DAYS, 10) || 180;
 async function purgeOldData() {
   try {
     const n = await db.purgeOldOrders(RETENTION_DAYS);
     if (n > 0) console.log(`Purged ${n} order(s) older than ${RETENTION_DAYS} days: pages and personal details deleted.`);
+    const e = await db.purgeOldEvents(EVENT_RETENTION_DAYS);
+    if (e > 0) console.log(`Purged ${e} funnel counter(s) older than ${EVENT_RETENTION_DAYS} days.`);
   } catch (err) {
     console.error('Retention purge failed:', err.message);
   }
