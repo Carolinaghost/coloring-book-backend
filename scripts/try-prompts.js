@@ -26,7 +26,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { STORY_SCENES } = require('../server');
+const { STORY_SCENES, BASE_STYLE: STYLE } = require('../server');
 
 const KEY = process.env.OPENAI_API_KEY;
 const MODEL = 'gpt-image-2';
@@ -62,7 +62,8 @@ function collectPhotos(value) {
   return out;
 }
 
-const STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions, simple line art suitable for a child to color in.';
+// Pulled from server.js rather than copied, so the test always exercises the
+// same style text production sends.
 
 // The camera the page is supposed to use. Deliberately one the reference photo
 // cannot be: a selfie is never a full figure seen from below.
