@@ -1,4 +1,5 @@
 require('dotenv').config();
+const sharp = require('sharp');
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -392,6 +393,46 @@ if (!OPENAI_API_KEY) {
 
 const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions, simple line art suitable for a child to color in.';
 
+// The photo goes to the model through /images/edits, which by default hands
+// back something close to the photo it was given: same pose, same crop, same
+// angle. Naming a camera is not enough on its own - the photo has to be
+// demoted to a likeness reference explicitly, or page one comes back as the
+// uploaded snapshot with outlines on it.
+const PHOTO_USE = 'Use the reference photo only for the faces, hair and features. Do not copy its pose, framing, background or camera angle: this page is a new drawing of the same people somewhere else, not the photo traced over.';
+
+// Without a camera direction the image model falls back to the same head-on
+// portrait every time, so a whole book came back looking like a page of
+// passport photos. buildPrompt walks this list with sceneIndex, and every theme
+// is 15 scenes long, so a book uses each entry once and never repeats a shot.
+//
+// Every entry moves two things: where the head is pointing (chin up, chin down,
+// tilted, a three-quarter turn, looking back over the shoulder, a sideways
+// glance) and how close the camera is (close-up, medium, full body, wide).
+// Both axes verified against live output.
+//
+// NEVER add "from behind", a strict side profile, or "running away" to this
+// list. Asked for any of those, the model draws a SECOND child facing away
+// instead of turning the first one around, and the page comes back with a
+// stranger in it. "Looking back over the shoulder toward the viewer" is the
+// safe way to get the same feeling, because the face stays in frame.
+const SHOTS = [
+  'medium shot, waist up, head tilted slightly, face toward the viewer',
+  'close-up, head and shoulders filling the frame, chin up',
+  'full body, head to toe, three-quarter turn with the face toward the viewer',
+  'wide shot with plenty of the setting around them, chin down, looking at what their hands are doing',
+  'medium shot, waist up, glancing sideways without turning the body',
+  'close-up, chin down and head tilted',
+  'full body, head to toe, looking back over the shoulder toward the viewer',
+  'wide shot with the setting around them, chin up, looking upward',
+  'medium shot, three-quarter turn, glancing sideways',
+  'close-up, looking back over the shoulder toward the viewer',
+  'full body, head to toe, chin up',
+  'medium shot, waist up, chin down with the head tilted',
+  'wide shot, three-quarter turn, face toward the viewer',
+  'close-up, chin up and glancing sideways',
+  'medium-wide, face toward the viewer, head tilted'
+];
+
 function subjectPhrase(count, subjectType) {
   const noun = subjectType === 'adult' ? 'people' : 'children';
   const singularNoun = subjectType === 'adult' ? 'the person' : 'the child';
@@ -400,14 +441,37 @@ function subjectPhrase(count, subjectType) {
   return singularNoun;
 }
 
+// Scene lines are written with a singular subject ("the child climbs into the
+// fire engine"). For a two- or three-subject book that subject becomes plural,
+// so the verb after it has to drop its third-person -s or the prompt reads
+// "both children climbs into the fire engine". Only the verb directly after the
+// subject is touched: a later clause can belong to something else entirely
+// ("meets a small talking fox who offers to be their guide").
+const IRREGULAR_PLURAL_VERBS = { is: 'are', was: 'were', has: 'have', does: 'do', goes: 'go' };
+
+function pluralizeVerb(word) {
+  if (IRREGULAR_PLURAL_VERBS[word]) return IRREGULAR_PLURAL_VERBS[word];
+  // Participles ("playing") and anything that is not a verb at all ("with",
+  // "and", "mid-jump") carry no -s and need no help.
+  if (!word.endsWith('s') || word.endsWith('ss')) return word;
+  if (word.endsWith('ies') && word.length > 4) return word.slice(0, -3) + 'y'; // carries -> carry
+  if (/(sses|shes|ches|xes|zes)$/.test(word)) return word.slice(0, -2); // washes -> wash
+  return word.slice(0, -1); // climbs -> climb
+}
+
 function consistencyLine(count, subjectType) {
   const possessive = subjectType === 'adult' ? 'person\'s' : 'child\'s';
   if (count > 1) {
-    return 'The reference photo shows ' + subjectPhrase(count, subjectType) + '. Keep each ' + possessive + ' individual likeness consistent across every scene, and show them together, interacting, in every scene.';
+    return 'The reference photo shows ' + subjectPhrase(count, subjectType) + '. Keep each ' + possessive + ' face, hair and features recognisable across every scene. Recognisable means the same likeness, not the same pose: vary their posture, expression and viewing angle from scene to scene. Show them together, interacting, in every scene.';
   }
-  return 'Keep the likeness of ' + subjectPhrase(count, subjectType) + ' from the reference photo consistent across the whole story.';
+  return 'Keep the face, hair and features of ' + subjectPhrase(count, subjectType) + ' recognisable from the reference photo across the whole story. Recognisable means the same likeness, not the same pose: the posture, expression and viewing angle should change from scene to scene.';
 }
 
+// Every line is written for one subject: "the child" followed by a single
+// simple-present verb. buildPrompt swaps in a plural subject and fixes that
+// verb for multi-subject books, so keep new lines in the same shape and put any
+// second action in a participial clause ("..., slowing it down") rather than
+// "and slows it down".
 const STORY_SCENES = {
   'Superhero': [
     'the child discovers a glowing cape in their bedroom',
@@ -415,7 +479,7 @@ const STORY_SCENES = {
     'the child leaps off a rooftop, cape flying, starting to fly',
     'the child soars above city skyscrapers for the first time',
     'the child rescues a kitten stuck in a tall tree',
-    'the child races a speeding runaway train and slows it down',
+    'the child races a speeding runaway train, slowing it down',
     'the child lifts a fallen tree off a road to clear the way',
     'the child faces down a cartoonish storm cloud villain in the sky',
     'the child uses super strength to hold up a collapsing bridge',
@@ -481,8 +545,8 @@ const STORY_SCENES = {
     'the child tries on a firefighter helmet for the first time, grinning',
     'the child slides down the fire station pole',
     'the child polishes the big red fire engine',
-    'the child checks the hose and coils it neatly',
-    'the child climbs into the fire engine and takes the wheel',
+    'the child checks the hose, coiling it neatly',
+    'the child climbs into the fire engine, taking the wheel',
     'the child rides the fire engine with the ladder raised high',
     'the child raises the ladder toward a tall building',
     'the child rescues a kitten from a rooftop',
@@ -501,7 +565,7 @@ const STORY_SCENES = {
     'the child directs traffic at a busy crosswalk',
     'the child helps a family cross the street safely',
     'the child rides a police bicycle through a park',
-    'the child meets a friendly police dog and shakes its paw',
+    'the child meets a friendly police dog, shaking its paw',
     'the child returns a lost teddy bear to a smaller child',
     'the child helps an elderly person carry groceries',
     'the child talks with kids at a school assembly',
@@ -514,7 +578,7 @@ const STORY_SCENES = {
   'Doctor': [
     'the child puts on a white coat and a stethoscope',
     'the child listens to a teddy bear\'s heartbeat with a stethoscope',
-    'the child checks a patient\'s temperature and smiles reassuringly',
+    'the child checks a patient\'s temperature, smiling reassuringly',
     'the child wraps a bandage around a stuffed rabbit\'s paw',
     'the child looks into a microscope in a bright lab',
     'the child reads an X-ray on a light board',
@@ -567,8 +631,13 @@ const STORY_SCENES = {
 function buildPrompt(theme, sceneIndex, childCount, subjectType, notes) {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
   let scene = scenes[sceneIndex] || scenes[0];
-  scene = scene.replace(/\bthe child\b/g, subjectPhrase(childCount, subjectType));
-  let prompt = `${BASE_STYLE} ${consistencyLine(childCount, subjectType)} Scene: ${scene}.`;
+  const subject = subjectPhrase(childCount, subjectType);
+  if (childCount > 1) {
+    scene = scene.replace(/\bthe child\b(\s+)([a-z]+)/g, (match, gap, word) => subject + gap + pluralizeVerb(word));
+  }
+  scene = scene.replace(/\bthe child\b/g, subject);
+  let prompt = `${BASE_STYLE} ${consistencyLine(childCount, subjectType)} ${PHOTO_USE} Scene: ${scene}.`;
+  prompt += ` Camera: ${SHOTS[sceneIndex % SHOTS.length]}.`;
   if (notes && notes.trim()) {
     prompt += ` Also incorporate this detail where it fits naturally: ${notes.trim()}.`;
   }
@@ -599,6 +668,31 @@ async function waitForImageSlot(paid) {
   }
 }
 
+// The model ignores left and right: four explicit direction prompts came back
+// identical, so asking for it is wasted breath. Flipping the finished page is
+// the only thing that reliably stops every page in a book leaning the same way.
+// Roughly half, decided per page - a coin flip, which is what "roughly" means
+// here; over fifteen pages it lands near enough to half.
+//
+// Safe to do blind because the page has no text in it: BASE_STYLE rules out
+// text and captions, so there is no lettering to come back mirrored. If that
+// ever changes, this has to change with it.
+const MIRROR_CHANCE = 0.5;
+
+async function maybeMirror(b64) {
+  if (Math.random() >= MIRROR_CHANCE) return b64;
+  try {
+    // flop is the horizontal mirror; flip is vertical.
+    const mirrored = await sharp(Buffer.from(b64, 'base64')).flop().png().toBuffer();
+    return mirrored.toString('base64');
+  } catch (err) {
+    // A page that came back fine is worth more than a page that leans the right
+    // way, so a failed flip keeps the original rather than losing the drawing.
+    console.error('Mirror failed, keeping the page as drawn -', err.message);
+    return b64;
+  }
+}
+
 async function renderScene({ buffer, mimetype, filename, prompt, paid }) {
   await waitForImageSlot(paid === true);
   if (!OPENAI_API_KEY) throw new Error('Server is missing its OpenAI API key.');
@@ -621,7 +715,7 @@ async function renderScene({ buffer, mimetype, filename, prompt, paid }) {
   }
   const b64 = data.data && data.data[0] && data.data[0].b64_json;
   if (!b64) throw new Error('No image returned from OpenAI.');
-  return `data:image/png;base64,${b64}`;
+  return `data:image/png;base64,${await maybeMirror(b64)}`;
 }
 
 function dataUrlToBuffer(dataUrl) {
@@ -771,7 +865,7 @@ setInterval(() => {
     if (live.length === 0) eventHits.delete(ip);
     else eventHits.set(ip, live);
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref();
 
 app.post('/event', async (req, res) => {
   // Analytics must never be able to break a sale, so this answers 204 whatever
@@ -845,7 +939,7 @@ setInterval(() => {
     if (live.length === 0) previewHits.delete(ip);
     else previewHits.set(ip, live);
   }
-}, 15 * 60 * 1000);
+}, 15 * 60 * 1000).unref();
 
 app.post('/convert', upload.single('photo'), async (req, res) => {
   try {
@@ -961,7 +1055,6 @@ const PORT = process.env.PORT || 3000;
 // Bind the port FIRST. If the database is asleep or unreachable, the service
 // still starts and /health reports the problem, instead of the whole deploy
 // failing because the host never saw a port open.
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
 db.initDb().catch((err) => {
   console.error('Database init failed:', err.message);
@@ -985,8 +1078,9 @@ async function purgeOldData() {
     console.error('Retention purge failed:', err.message);
   }
 }
-setTimeout(purgeOldData, 60 * 1000);
-setInterval(purgeOldData, 6 * 60 * 60 * 1000);
+// unref'd: janitorial, and must not keep a process alive on its own.
+setTimeout(purgeOldData, 60 * 1000).unref();
+setInterval(purgeOldData, 6 * 60 * 60 * 1000).unref();
 
 // A book is drawn in this process's memory, so a restart - a deploy, a crash,
 // Render moving the instance - used to abandon whatever was mid-render, and
@@ -1019,7 +1113,15 @@ async function resumeUnfinished() {
     sweeping = false;
   }
 }
-// Once shortly after boot (the restart case), then periodically for anything
-// that dies while we are up.
-setTimeout(resumeUnfinished, 20 * 1000);
-setInterval(resumeUnfinished, 60 * 1000);
+// Only when run as the server. Required as a module - by a test, or by
+// scripts/render-test-book.js - this file hands back the prompt and render
+// helpers without opening a port or starting the resume sweeps.
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+  // Once shortly after boot (the restart case), then periodically for anything
+  // that dies while we are up.
+  setTimeout(resumeUnfinished, 20 * 1000);
+  setInterval(resumeUnfinished, 60 * 1000);
+}
+
+module.exports = { app, buildPrompt, renderScene, STORY_SCENES, SHOTS };
