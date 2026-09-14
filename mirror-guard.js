@@ -2,43 +2,57 @@
 
 // Does this page have words drawn into it?
 //
-// The pages get mirrored so a book does not lean the same way on every page
-// (server.js: maybeMirror). That was safe only while the pages had no
-// lettering in them. They do: BASE_STYLE asks for "no text or captions" and
-// the model writes on signs, jars, cushions and shop fronts anyway, and a
-// mirrored page turns those words back to front.
+// Pages get mirrored so a book does not lean the same way throughout
+// (server.js: maybeMirror). A page with writing on it must not be, or the
+// writing comes back reversed. BASE_STYLE asks for "no text or captions" and
+// the model letters signs, jars, cushions and picture frames anyway.
 //
-// So a page has to be read before it is flipped. Rather than pay for OCR on
-// every page, this leans on what a coloring page is: open outlines, nothing
-// filled in. Thin strokes wash out under a blur; the solid shapes that survive
-// are almost always letters. Letters then give themselves away by sitting in a
-// row - four or more blobs of a similar size sharing a baseline - which a dog
-// nose and a pair of eyes never do.
+// The first version of this blurred the page and looked for the solid shapes
+// that survived, on the theory that a coloring page is open outlines and only
+// letters are filled in. That theory was wrong, and it was wrong in the
+// direction that ships the bug: the model letters a sign with the same thin
+// stroke it draws everything else with - the words are meant to be coloured in
+// too - so the blur washed the words away with the drawing. It missed all six
+// real cases. It passed its own suite because the fixtures were solid bold
+// type, the one kind of lettering these pages never contain.
 //
-// Wrong in the cautious direction by design: an unflipped page is a page, but a
-// page of backwards writing is a reprint.
+// So: no blur, full resolution, and letters found the way a person finds them -
+// separate small marks of a common size, sitting in a row between a shared
+// cap-line and a shared baseline.
+//
+// KNOWN LIMIT, please read before trusting this. Coloring pages are full of
+// rows of similar aligned strokes - hair curls, knit ribbing, castle
+// crenellations, grass, fence palings - and this flags a fair number of them.
+// Measured on 63 pages with no words: 14 flagged. That is the cheap direction
+// (one page keeps the lean it was drawn with) and it is tuned that way on
+// purpose. The expensive direction is a miss, and the honest position is that
+// six real lettered pages is not enough evidence to promise there are none.
+// If mirroring matters more than that uncertainty, put OCR behind it instead.
 
 const sharp = require('sharp');
 
-// Everything below is tuned against the sample books in public/samples and
-// measured by test/mirror-guard.test.js. Change one, re-run that.
-const WIDTH = 512;          // working size; letters stay legible, labelling stays quick
-const BLUR = 1.6;           // washes out outline strokes, leaves filled shapes
-const DARK = 100;           // 0-255, what counts as still-solid after the blur
-const MIN_BLOB = 8;         // smaller than this is speckle
-const MAX_BLOB = 1400;      // larger than this is a filled object, not a glyph
-const MIN_H = 5;            // glyph box, in working pixels
-const MAX_H = 64;
-const ROW_TOLERANCE = 0.45; // how far off a shared baseline a glyph may sit
-const HEIGHT_RATIO = 2.4;   // tallest over shortest, within one word
-const GAP_RATIO = 2.2;      // space between glyphs, relative to their height
-const WORD_LENGTH = 4;      // blobs in a row before it counts as a word
+// Tuned against test/fixtures, which are real pages at the size production
+// actually produces. Change one, re-run test/mirror-guard.test.js - and do not
+// tune against generated lettering, which is how this went wrong the first time.
+const WIDTH = 1024;         // work at the size the model emits; downscaling hides thin strokes
+const DARK = 128;           // 0-255; ink against paper, no blur in front of it
+const MIN_H = 10;           // glyph box, in working pixels
+const MAX_H = 90;
+const MAX_ASPECT = 2.2;     // a letter is not much wider than it is tall
+const MIN_FILL = 0.12;      // of its own box; below this it is a stray line
+const MAX_FILL = 0.9;       // above this it is a filled shape, not a stroked letter
+const ALIGN = 0.18;         // how far off the shared cap-line and baseline a letter may sit
+const HEIGHT_RATIO = 1.6;   // tallest over shortest, within one word
+const GAP_RATIO = 1.2;      // space between letters, relative to their height
+const WORD_LENGTH = 3;      // letters in a row before it counts as a word
 
-// Solid shapes left standing after the blur, as { x, y, w, h, area } boxes.
-function solidBlobs(mask, width, height) {
+// Every separate mark on the page, as { x, y, w, h } boxes, filtered down to
+// the ones shaped like a letter. Letters are their own islands: they sit on a
+// sign, not touching the drawing around them.
+function marks(mask, width, height) {
   const seen = new Uint8Array(mask.length);
-  const blobs = [];
   const queue = new Int32Array(mask.length);
+  const found = [];
 
   for (let start = 0; start < mask.length; start++) {
     if (!mask[start] || seen[start]) continue;
@@ -66,39 +80,40 @@ function solidBlobs(mask, width, height) {
 
     const w = maxX - minX + 1;
     const h = maxY - minY + 1;
-    if (area < MIN_BLOB || area > MAX_BLOB) continue;
     if (h < MIN_H || h > MAX_H) continue;
-    if (w > h * 6) continue;  // a rule or a shelf edge, not a letter
-    blobs.push({ x: minX, y: minY, w, h, area });
+    if (w < 2 || w > h * MAX_ASPECT) continue;
+    const fill = area / (w * h);
+    if (fill < MIN_FILL || fill > MAX_FILL) continue;
+    found.push({ x: minX, y: minY, w, h });
   }
-  return blobs;
+  return found;
 }
 
-// The giveaway is the row, not the shape: letters of a size, side by side, on a
-// line. Anything that manages that is writing as far as a mirror is concerned.
-function longestRun(blobs) {
+// How many letters sit in the longest row. Capitals share a cap-line AND a
+// baseline; a row of unrelated marks may share a middle, but rarely both edges.
+function longestRow(letters) {
   let longest = 0;
 
-  for (let i = 0; i < blobs.length; i++) {
-    const line = [blobs[i]];
-    const first = blobs[i];
-    const mid = first.y + first.h / 2;
-
-    const near = blobs
-      .filter((b) => b !== first
-        && Math.abs((b.y + b.h / 2) - mid) < first.h * ROW_TOLERANCE
-        && Math.max(b.h, first.h) / Math.min(b.h, first.h) < HEIGHT_RATIO)
+  for (const first of letters) {
+    const line = letters
+      .filter((other) =>
+        Math.abs(other.y - first.y) < first.h * ALIGN
+        && Math.abs((other.y + other.h) - (first.y + first.h)) < first.h * ALIGN
+        && Math.max(other.h, first.h) / Math.min(other.h, first.h) < HEIGHT_RATIO)
       .sort((a, b) => a.x - b.x);
 
-    // Walk left to right; a wide gap ends the word rather than joining two.
-    let run = [first];
-    for (const b of near.concat(line)) {
-      const last = run[run.length - 1];
-      if (b === last) continue;
-      const gap = b.x - (last.x + last.w);
-      if (b.x >= last.x && gap >= 0 && gap < last.h * GAP_RATIO) run.push(b);
+    // Walk left to right. A wide gap ends the word rather than joining two
+    // across half the page.
+    let run = 0;
+    let last = null;
+    for (const mark of line) {
+      if (!last) { last = mark; run = 1; continue; }
+      const gap = mark.x - (last.x + last.w);
+      if (gap >= -2 && gap < last.h * GAP_RATIO) run++;
+      else if (gap >= 0) run = 1;
+      last = mark;
+      if (run > longest) longest = run;
     }
-    if (run.length > longest) longest = run.length;
   }
   return longest;
 }
@@ -109,14 +124,13 @@ async function hasWords(buffer) {
     .flatten({ background: '#ffffff' })
     .greyscale()
     .resize(WIDTH, WIDTH, { fit: 'inside' })
-    .blur(BLUR)
     .raw()
     .toBuffer({ resolveWithObject: true });
 
   const mask = new Uint8Array(info.width * info.height);
   for (let i = 0; i < mask.length; i++) mask[i] = data[i * info.channels] < DARK ? 1 : 0;
 
-  return longestRun(solidBlobs(mask, info.width, info.height)) >= WORD_LENGTH;
+  return longestRow(marks(mask, info.width, info.height)) >= WORD_LENGTH;
 }
 
 module.exports = { hasWords, WORD_LENGTH };
