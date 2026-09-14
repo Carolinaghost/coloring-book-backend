@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const mailer = require('./mailer');
+const mirrorGuard = require('./mirror-guard');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
@@ -676,16 +677,27 @@ async function waitForImageSlot(paid) {
 // Roughly half, decided per page - a coin flip, which is what "roughly" means
 // here; over fifteen pages it lands near enough to half.
 //
-// Safe to do blind because the page has no text in it: BASE_STYLE rules out
-// text and captions, so there is no lettering to come back mirrored. If that
-// ever changes, this has to change with it.
+// This used to be done blind, on the grounds that BASE_STYLE rules out text and
+// captions so there would be no lettering to come back mirrored. The model does
+// not honour that: it writes on signs, jars, cushions and shop fronts anyway,
+// and those pages came back reading right to left. So every page is now read
+// for words first, and a page with writing on it is left as drawn.
 const MIRROR_CHANCE = 0.5;
 
 async function maybeMirror(b64) {
   if (Math.random() >= MIRROR_CHANCE) return b64;
+  const buffer = Buffer.from(b64, 'base64');
+  try {
+    if (await mirrorGuard.hasWords(buffer)) return b64;
+  } catch (err) {
+    // Unreadable means unflippable. Leaning the same way is a page nobody
+    // notices; backwards writing is a page that gets sent back.
+    console.error('Could not check the page for words, leaving it as drawn -', err.message);
+    return b64;
+  }
   try {
     // flop is the horizontal mirror; flip is vertical.
-    const mirrored = await sharp(Buffer.from(b64, 'base64')).flop().png().toBuffer();
+    const mirrored = await sharp(buffer).flop().png().toBuffer();
     return mirrored.toString('base64');
   } catch (err) {
     // A page that came back fine is worth more than a page that leans the right
@@ -1156,4 +1168,4 @@ if (require.main === module) {
   setInterval(resumeUnfinished, 60 * 1000);
 }
 
-module.exports = { app, buildPrompt, renderScene, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
+module.exports = { app, buildPrompt, renderScene, maybeMirror, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
