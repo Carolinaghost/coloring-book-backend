@@ -475,16 +475,30 @@ function cleanPeople(raw) {
     .map((p) => ({
       name: String(p.name || '').slice(0, 60).trim(),
       subjectType: p.subjectType === 'adult' ? 'adult' : 'kid',
+      // The one the story follows. The book is for a child, so a child is who
+      // it should be about even when the whole family is in it.
+      star: p.star === true,
       photo: typeof p.photo === 'string' ? p.photo : null
     }))
     .filter((p) => p.name)
     .slice(0, MAX_PEOPLE);
 }
 
+// Whoever the order marked, otherwise the first child, otherwise the first
+// person. A family book is bought for a child to colour, so without being told
+// anything the story still follows a child rather than whoever was uploaded
+// first.
+function pickStar(people) {
+  return people.find((p) => p.star)
+    || people.find((p) => p.subjectType === 'kid')
+    || people[0];
+}
+
 // Who the book is about, tied to the order the photos are sent in. The model
 // gets one photo per person rather than one crowded group shot, so it has to be
 // told which is which - "in the same order" is the whole hinge.
 function castLine(people) {
+  const star = pickStar(people);
   const described = people.map((p) => {
     const kind = p.subjectType === 'adult' ? 'an adult' : 'a child';
     return `${p.name} (${kind})`;
@@ -497,7 +511,9 @@ function castLine(people) {
     + 'Keep every one of them recognisable on every page they appear, and draw them at their own age - '
     + 'the adults as adults and the children as children, never all the same size. '
     + 'Recognisable means the same likeness, not the same pose: vary posture, expression and viewing '
-    + 'angle from scene to scene. Show the family together, doing the scene as a group.';
+    + 'angle from scene to scene. Show the family together, doing the scene as a group, '
+    + `and keep ${star.name} at the centre of it: this is ${star.name}'s story and the rest of the `
+    + `family are there with ${star.name}, never instead of ${star.name}.`;
 }
 
 function subjectPhrase(count, subjectType) {
@@ -585,7 +601,7 @@ const STORY_SCENES = {
     'the child is welcomed into the castle by kind fairy folk',
     'the child dances at a fairy tale ball in the castle hall',
     'the child helps break a spell on a sleeping garden',
-    'the flowers and trees in the garden bloom back to life',
+    'the child watches the flowers and trees in the garden bloom back to life',
     'the child rides the dragon over the treetops of the enchanted forest',
     'the child and the fox watch the sunset from a castle tower',
     'the child is given a small glowing charm as a keepsake',

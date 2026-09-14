@@ -14,7 +14,7 @@
 
 const http = require('http');
 
-const { app, buildPrompt, MAX_PEOPLE } = require('../server.js');
+const { app, buildPrompt, MAX_PEOPLE, STORY_SCENES } = require('../server.js');
 
 let pass = 0;
 const failures = [];
@@ -82,6 +82,41 @@ async function main() {
   check('ages are held apart', family.includes('the adults as adults and the children as children'), true);
   check('the scene is the family, not one child', family.includes('the family baking cookies'), true);
   check('no leftover "the child"', /\bthe child\b/.test(family.split('Scene:')[1]), false);
+
+  console.log('\nThe child is the one the story follows');
+
+  // The book is bought for a child to colour. Whoever is uploaded first, the
+  // story has to be about the child, or a parent gets a book starring themselves.
+  check('a child is the centre by default', family.includes("this is Leo's story"), true);
+  const adultsFirst = buildPrompt('Superhero', 0, 1, 'kid', '', [
+    { name: 'Gran', subjectType: 'adult' }, { name: 'Ivy', subjectType: 'kid' }
+  ]);
+  check('even when adults are listed first', adultsFirst.includes("this is Ivy's story"), true);
+  // An explicit choice wins, for the family where more than one child is in it.
+  const chosen = buildPrompt('Superhero', 0, 1, 'kid', '', [
+    { name: 'Ivy', subjectType: 'kid' }, { name: 'Sam', subjectType: 'kid', star: true }
+  ]);
+  check('an explicit choice wins', chosen.includes("this is Sam's story"), true);
+  check('the family is around them, not instead of them',
+    family.includes('never instead of Leo'), true);
+
+  console.log('\nEvery theme can carry a family');
+
+  // A family book works by swapping "the child" out of the scene. A scene that
+  // never says it would render with the family unmentioned - the page would
+  // come back with nobody the parent recognises on it.
+  const sceneless = [];
+  for (const [theme, scenes] of Object.entries(STORY_SCENES)) {
+    scenes.forEach((scene, i) => {
+      if (!/\bthe child\b/.test(scene)) sceneless.push(`${theme} p${i + 1}`);
+    });
+  }
+  check('every scene in every theme names the child', sceneless, []);
+
+  // And the swap really happens, on a theme other than the one it was built on.
+  const everyTheme = Object.keys(STORY_SCENES).filter((theme) =>
+    !buildPrompt(theme, 0, 1, 'kid', '', FAMILY).includes('the family'));
+  check('and the family reaches the scene on all of them', everyTheme, []);
 
   console.log('\nA one-person book is left exactly as it was');
 
