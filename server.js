@@ -24,6 +24,11 @@ app.set('trust proxy', 1);
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
+// A family book is the same fifteen pages but several photos and a harder job,
+// so it can carry its own price. Defaults to the ordinary price rather than a
+// number nobody chose - set FAMILY_PRICE_CENTS when you have decided what a
+// family book is worth.
+const FAMILY_PRICE_CENTS = parseInt(process.env.FAMILY_PRICE_CENTS, 10) || PRICE_CENTS;
 // How many pages to draw at the same time. One at a time meant ~37s x 15 pages,
 // nearly ten minutes of waiting. Raise carefully: too many at once and OpenAI
 // starts rate limiting, which shows up as failed pages.
@@ -163,6 +168,9 @@ app.post('/orders', async (req, res) => {
       // kept so the server can draw the book after payment without the browser
       photo: typeof req.body.photo === 'string' ? req.body.photo : null,
       subjectType: req.body.subjectType === 'adult' ? 'adult' : 'kid',
+      // A family book: one entry per person, each carrying their own photo.
+      // Absent or a single entry and this stays an ordinary one-subject book.
+      people: cleanPeople(req.body.people),
       // Remembered so the Stripe webhook can credit the sale to whatever
       // brought this person here, minutes later and on a different request.
       visitor: String(req.body.visitor || '').slice(0, 64),
@@ -282,10 +290,11 @@ app.post('/checkout', async (req, res) => {
     if (order.paid) return res.status(409).json({ error: 'This order is already paid.' });
 
     const isPrint = product === 'print';
-    const amount = isPrint ? PRICE_CENTS + 2000 : PRICE_CENTS;
-    const label = isPrint
-      ? 'Personalized coloring book - printed copy'
-      : 'Personalized coloring book - digital PDF';
+    const isFamily = Array.isArray(order.people) && order.people.length > 1;
+    const base = isFamily ? FAMILY_PRICE_CENTS : PRICE_CENTS;
+    const amount = isPrint ? base + 2000 : base;
+    const kind = isFamily ? 'Personalized family coloring book' : 'Personalized coloring book';
+    const label = isPrint ? `${kind} - printed copy` : `${kind} - digital PDF`;
 
     // Stripe's API takes form-encoded bodies, not JSON.
     const form = new URLSearchParams();
@@ -412,6 +421,10 @@ const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only
 // demoted to a likeness reference explicitly, or page one comes back as the
 // uploaded snapshot with outlines on it.
 const PHOTO_USE = 'Use the reference photo only for the faces, hair and features. Do not copy its pose, framing, background or camera angle: this page is a new drawing of the same people somewhere else, not the photo traced over.';
+// Same instruction for a family book, where several photos are sent and none of
+// them is the page. Kept as its own string rather than patched at runtime: the
+// single-subject wording is load-bearing and has been through enough already.
+const PHOTO_USE_MANY = 'Use the reference photos only for faces, hair and features. Do not copy any of their poses, framing, backgrounds or camera angles: this page is a new drawing of the same people somewhere else, not a photo traced over.';
 
 // Without a camera direction the image model falls back to the same head-on
 // portrait every time, so a whole book came back looking like a page of
@@ -445,6 +458,47 @@ const SHOTS = [
   'close-up, chin up and glancing sideways',
   'medium-wide, face toward the viewer, head tilted'
 ];
+
+// A family book: up to this many people, each with their own photo. Five covers
+// two parents, two children and a grandparent, which is the shape most families
+// asking for this have. Every extra face is another likeness the model has to
+// hold steady across fifteen pages, so this is a quality ceiling as much as a
+// technical one.
+const MAX_PEOPLE = parseInt(process.env.MAX_PEOPLE, 10) || 5;
+
+// Keep only what a person needs to be drawn, and only as many as we allow.
+// Anything malformed is dropped rather than passed to the model as "undefined".
+function cleanPeople(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((p) => p && typeof p === 'object')
+    .map((p) => ({
+      name: String(p.name || '').slice(0, 60).trim(),
+      subjectType: p.subjectType === 'adult' ? 'adult' : 'kid',
+      photo: typeof p.photo === 'string' ? p.photo : null
+    }))
+    .filter((p) => p.name)
+    .slice(0, MAX_PEOPLE);
+}
+
+// Who the book is about, tied to the order the photos are sent in. The model
+// gets one photo per person rather than one crowded group shot, so it has to be
+// told which is which - "in the same order" is the whole hinge.
+function castLine(people) {
+  const described = people.map((p) => {
+    const kind = p.subjectType === 'adult' ? 'an adult' : 'a child';
+    return `${p.name} (${kind})`;
+  });
+  const list = described.length > 1
+    ? described.slice(0, -1).join(', ') + ' and ' + described[described.length - 1]
+    : described[0];
+  return `There is one reference photo per person, in this same order: ${list}. `
+    + 'Each photo shows only that person; use it for their face, hair and features and nobody else\'s. '
+    + 'Keep every one of them recognisable on every page they appear, and draw them at their own age - '
+    + 'the adults as adults and the children as children, never all the same size. '
+    + 'Recognisable means the same likeness, not the same pose: vary posture, expression and viewing '
+    + 'angle from scene to scene. Show the family together, doing the scene as a group.';
+}
 
 function subjectPhrase(count, subjectType) {
   const noun = subjectType === 'adult' ? 'people' : 'children';
@@ -641,15 +695,24 @@ const STORY_SCENES = {
   ]
 };
 
-function buildPrompt(theme, sceneIndex, childCount, subjectType, notes) {
+// people is optional: pass it for a family book, where each person has their own
+// photo and their own name, and leave it out for the single-subject book, which
+// still works off childCount and one photo exactly as it always did.
+function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people) {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
   let scene = scenes[sceneIndex] || scenes[0];
-  const subject = subjectPhrase(childCount, subjectType);
-  if (childCount > 1) {
-    scene = scene.replace(/\bthe child\b(\s+)([a-z]+)/g, (match, gap, word) => subject + gap + pluralizeVerb(word));
+  const cast = cleanPeople(people);
+  const isFamily = cast.length > 1;
+
+  // The scenes are written around "the child". A family does the same thing
+  // together, so the subject becomes the family and the verb follows it.
+  const subject = isFamily ? 'the family' : subjectPhrase(childCount, subjectType);
+  if (isFamily || childCount > 1) {
+    scene = scene.replace(/\bthe child\b(\s+)([a-z]+)/g, (match, gap, word) => subject + gap + (isFamily ? word : pluralizeVerb(word)));
   }
   scene = scene.replace(/\bthe child\b/g, subject);
-  let prompt = `${BASE_STYLE} ${consistencyLine(childCount, subjectType)} ${PHOTO_USE} Scene: ${scene}.`;
+  const who = isFamily ? castLine(cast) : consistencyLine(childCount, subjectType);
+  let prompt = `${BASE_STYLE} ${who} ${isFamily ? PHOTO_USE_MANY : PHOTO_USE} Scene: ${scene}.`;
   prompt += ` Camera: ${SHOTS[sceneIndex % SHOTS.length]}.`;
   if (notes && notes.trim()) {
     prompt += ` Also incorporate this detail where it fits naturally: ${notes.trim()}.`;
@@ -728,16 +791,31 @@ async function maybeMirror(b64) {
   }
 }
 
-async function renderScene({ buffer, mimetype, filename, prompt, paid }) {
+// One scene. Takes either a single photo (buffer/mimetype/filename) or, for a
+// family book, a photos array of those same three fields - one entry per
+// person, in the order the prompt names them.
+async function renderScene({ buffer, mimetype, filename, photos, prompt, paid }) {
   await waitForImageSlot(paid === true);
   if (!CAN_CALL_OPENAI) throw new Error('Server is missing its OpenAI API key.');
+
+  const references = Array.isArray(photos) && photos.length
+    ? photos
+    : [{ buffer, mimetype, filename }];
+  if (!references.length || !references[0].buffer) throw new Error('No reference photo to draw from.');
 
   const form = new FormData();
   form.append('model', 'gpt-image-2');
   form.append('prompt', prompt);
   form.append('size', '1024x1024');
   form.append('quality', 'medium');
-  form.append('image', new Blob([buffer], { type: mimetype || 'image/jpeg' }), filename || 'photo.png');
+  // A single photo keeps the field name it has always had. Several go as
+  // image[], which the images API accepts and matches to the order the prompt
+  // introduces people in.
+  const field = references.length > 1 ? 'image[]' : 'image';
+  references.forEach((ref, i) => {
+    form.append(field, new Blob([ref.buffer], { type: ref.mimetype || 'image/jpeg' }),
+      ref.filename || `photo-${i + 1}.png`);
+  });
 
   const response = await fetch('https://api.openai.com/v1/images/edits', {
     method: 'POST',
@@ -791,14 +869,26 @@ async function renderBook(orderId) {
       console.log(`Order ${orderId} is already done; nothing to render.`);
       return;
     }
-    if (!order.photo) throw new Error('No photo stored for this order.');
+    const cast = cleanPeople(order.people);
+    const isFamily = cast.length > 1;
+    if (!isFamily && !order.photo) throw new Error('No photo stored for this order.');
+    if (isFamily && !cast.every((p) => p.photo)) throw new Error('A person in this family book has no photo stored.');
 
     await db.bumpRenderAttempts(orderId);
     await db.setGenerationStatus(orderId, 'running');
 
     const scenes = STORY_SCENES[order.theme] || STORY_SCENES['Portrait'];
     const total = scenes.length;
-    const { buffer, mimetype } = dataUrlToBuffer(order.photo);
+    // One photo per person for a family book, the single photo otherwise.
+    const references = isFamily
+      ? cast.map((person, i) => {
+          const { buffer, mimetype } = dataUrlToBuffer(person.photo);
+          return { buffer, mimetype, filename: `person-${i + 1}.png` };
+        })
+      : [(() => {
+          const { buffer, mimetype } = dataUrlToBuffer(order.photo);
+          return { buffer, mimetype, filename: 'photo.png' };
+        })()];
     const already = new Set(await db.doneSceneIndexes(orderId));
     const subjectType = order.subjectType === 'adult' ? 'adult' : 'kid';
 
@@ -815,9 +905,9 @@ async function renderBook(orderId) {
         const slot = nextUp++;
         if (slot >= todo.length) return;
         const sceneIndex = todo[slot];
-        const prompt = buildPrompt(order.theme, sceneIndex, order.childCount, subjectType, order.notes);
+        const prompt = buildPrompt(order.theme, sceneIndex, order.childCount, subjectType, order.notes, cast);
         try {
-          const image = await renderScene({ buffer, mimetype, filename: 'photo.jpg', prompt, paid: true });
+          const image = await renderScene({ photos: references, prompt, paid: true });
           await db.savePage(orderId, sceneIndex, image);
           console.log(`Order ${orderId}: page ${sceneIndex + 1}/${total} done.`);
         } catch (err) {
@@ -934,6 +1024,23 @@ app.get('/stats', async (req, res) => {
   }
 });
 
+// What the site is allowed to offer, so the order form does not have to keep
+// its own copy of the limits and prices and drift out of step with them.
+app.get('/options', (req, res) => {
+  res.json({
+    themes: Object.keys(STORY_SCENES),
+    freePreviewPages: FREE_PREVIEW_PAGES,
+    priceCents: PRICE_CENTS,
+    family: {
+      maxPeople: MAX_PEOPLE,
+      // Two or more people, each with their own photo, is what makes a book a
+      // family book - and what makes it cost the family price.
+      minPeople: 2,
+      priceCents: FAMILY_PRICE_CENTS
+    }
+  });
+});
+
 app.get('/story-length', (req, res) => {
   const theme = req.query.theme || 'Portrait';
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
@@ -976,9 +1083,16 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000).unref();
 
-app.post('/convert', upload.single('photo'), async (req, res) => {
+// photo: the single-subject book, unchanged. photos: a family book, one file per
+// person, in the same order as the people field that names them.
+app.post('/convert', upload.fields([
+  { name: 'photo', maxCount: 1 },
+  { name: 'photos', maxCount: MAX_PEOPLE }
+]), async (req, res) => {
   try {
-    if (!req.file) {
+    const singlePhoto = (req.files && req.files.photo && req.files.photo[0]) || null;
+    const familyPhotos = (req.files && req.files.photos) || [];
+    if (!singlePhoto && !familyPhotos.length) {
       return res.status(400).json({ error: 'No photo uploaded.' });
     }
     if (!CAN_CALL_OPENAI) {
@@ -1029,17 +1143,34 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
     childCount = Math.min(Math.max(childCount, 1), 3);
     const subjectType = req.body.subjectType === 'adult' ? 'adult' : 'kid';
     const notes = (req.body.notes || '').slice(0, 300);
-    const prompt = buildPrompt(theme, sceneIndex, childCount, subjectType, notes);
+
+    // Sent as JSON text because this request is multipart, not JSON. A family
+    // needs a name per photo; without them the model has no way to tell the
+    // photos apart, so a mismatch is refused rather than guessed at.
+    let cast = [];
+    if (req.body.people) {
+      try {
+        cast = cleanPeople(JSON.parse(req.body.people));
+      } catch (err) {
+        return res.status(400).json({ error: 'Could not read the list of people.' });
+      }
+    }
+    if (familyPhotos.length && cast.length !== familyPhotos.length) {
+      return res.status(400).json({
+        error: `Send one name per photo: ${familyPhotos.length} photo(s) but ${cast.length} name(s).`
+      });
+    }
+
+    const prompt = buildPrompt(theme, sceneIndex, childCount, subjectType, notes, cast);
 
     let image;
     try {
-      image = await renderScene({
-        buffer: req.file.buffer,
-        mimetype: req.file.mimetype,
-        filename: req.file.originalname || 'photo.png',
-        prompt,
-        paid: paidOrder !== null
-      });
+      const references = (familyPhotos.length ? familyPhotos : [singlePhoto]).map((file, i) => ({
+        buffer: file.buffer,
+        mimetype: file.mimetype,
+        filename: file.originalname || `photo-${i + 1}.png`
+      }));
+      image = await renderScene({ photos: references, prompt, paid: paidOrder !== null });
     } catch (renderErr) {
       console.error('OpenAI error:', renderErr.message);
       return res.status(502).json({ error: 'Image conversion failed.', detail: renderErr.message });
@@ -1189,4 +1320,4 @@ if (require.main === module) {
   setInterval(resumeUnfinished, 60 * 1000);
 }
 
-module.exports = { app, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
+module.exports = { app, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
