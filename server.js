@@ -376,12 +376,22 @@ app.get('/orders/:id/access', async (req, res) => {
     if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
     // childName and theme are here so an emailed recovery link can rebuild the
     // PDF on a device that never had this order in local storage.
+    //
+    // email and peopleCount are for the waiting page: it tells the customer
+    // they can close the tab, and people only believe that if it reads their
+    // own address back to them. peopleCount picks the wait to quote, because a
+    // family page takes about half as long again as a single one. Both come
+    // from here rather than the browser so an emailed link on a different
+    // device says the same thing. The access token was sent to this address,
+    // so showing it back to whoever holds the token tells them nothing new.
     res.json({
       id: order.id,
       paid: order.paid,
       status: order.status,
       product: order.product,
       childName: order.childName,
+      email: order.email,
+      peopleCount: Array.isArray(order.people) ? order.people.length : 0,
       theme: order.theme,
       pageCount: order.pageCount,
       generationStatus: order.generationStatus,
