@@ -677,12 +677,23 @@ async function waitForImageSlot(paid) {
 // Roughly half, decided per page - a coin flip, which is what "roughly" means
 // here; over fifteen pages it lands near enough to half.
 //
-// This used to be done blind, on the grounds that BASE_STYLE rules out text and
-// captions so there would be no lettering to come back mirrored. The model does
-// not honour that: it writes on signs, jars, cushions and shop fronts anyway,
-// and those pages came back reading right to left. So every page is now read
-// for words first, and a page with writing on it is left as drawn.
-const MIRROR_CHANCE = 0.5;
+// Off by default, and that is a retreat.
+//
+// Flipping was done blind at first, on the grounds that BASE_STYLE rules out
+// text so there would be no lettering to reverse. The model letters signs and
+// jars anyway, and four pages in a sixty-page run shipped reading right to
+// left. The fix was to read each page for words first - but the first reader
+// missed all six real cases, and the replacement (mirror-guard.js) is only
+// measured against those same six. Six pages is not enough to promise a
+// seventh kind of lettering gets caught, and the thing being risked is a
+// finished book someone paid for.
+//
+// So the lean-variety this buys is not worth the remaining doubt, and pages go
+// out as drawn. Set MIRROR_CHANCE to put it back - 0.5 is what it used to run
+// at - and the word check still gates every flip.
+const MIRROR_CHANCE = process.env.MIRROR_CHANCE !== undefined
+  ? Math.min(1, Math.max(0, parseFloat(process.env.MIRROR_CHANCE) || 0))
+  : 0;
 
 async function maybeMirror(b64) {
   if (Math.random() >= MIRROR_CHANCE) return b64;

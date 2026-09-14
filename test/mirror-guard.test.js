@@ -6,25 +6,25 @@
 //
 //   npm test
 //
-// Pages get flipped so a book does not lean the same way throughout. A page
-// with writing on it must not be, or the writing comes back reversed - which
-// is the bug this exists to prevent.
+// The fixtures in test/fixtures are real pages from a 60-page run, at the size
+// the model actually produces. Six of them came back with lettering drawn in;
+// twelve came back clean. They are the whole point of this file.
 //
-// Negatives are real: every sample page in public/samples, none of which has
-// words on it. Positives are made here by drawing solid block capitals onto
-// those same pages, the way the model letters a sign or a jar, because a page
-// that came back with writing on it is exactly the page we do not keep.
+// An earlier version of this suite used lettering drawn on here with sharp -
+// solid bold type - and passed while the guard missed all six real pages. Solid
+// type is the one kind of lettering these pages never contain: the model
+// letters a sign in the same thin stroke as the drawing, because the words are
+// meant to be coloured in. Generated positives cannot stand in for real ones
+// here. Do not reintroduce them as the only positive case.
 //
-// A miss is the expensive direction: it ships a book of backwards words. A
-// false alarm only costs one page its flip, so the thresholds in mirror-guard
-// lean that way on purpose.
+// A miss is the expensive direction: it ships a book with backwards writing in
+// it. A false alarm costs one page the flip it would have got.
 
 const fs = require('fs');
 const path = require('path');
-const sharp = require('sharp');
 
 const { hasWords, WORD_LENGTH } = require('../mirror-guard.js');
-const SAMPLES_DIR = path.join(__dirname, '..', 'public', 'samples');
+const FIXTURES = path.join(__dirname, 'fixtures');
 
 let pass = 0;
 const failures = [];
@@ -41,65 +41,44 @@ function check(label, got, want) {
   }
 }
 
-// Lettering in the style the model actually produces: solid, not outlined.
-// Placed over a real page so the check has to pick it out of a drawing rather
-// than off a blank sheet.
-function letterOver(file, text, size, x, y) {
-  const svg = Buffer.from(
-    `<svg width="1024" height="1024"><text x="${x}" y="${y}" font-family="DejaVu Sans"`
-    + ` font-weight="bold" font-size="${size}" fill="black">${text}</text></svg>`
-  );
-  return sharp(file).resize(1024, 1024).composite([{ input: svg }]).png().toBuffer();
+function fixtures(group) {
+  return fs.readdirSync(path.join(FIXTURES, group)).filter((f) => f.endsWith('.webp')).sort();
 }
 
 async function main() {
-  console.log('\nPages with no words (real sample pages)');
-
-  const pages = fs.readdirSync(SAMPLES_DIR).filter((f) => f.endsWith('.webp')).sort();
-  check('there are pages to check', pages.length > 0, true);
-
-  const falseAlarms = [];
-  for (const page of pages) {
-    if (await hasWords(fs.readFileSync(path.join(SAMPLES_DIR, page)))) falseAlarms.push(page);
-  }
-  check('none of them is mistaken for writing', falseAlarms, []);
-
-  console.log('\nPages with words drawn on (the case that caused this)');
-
-  // Sizes and wording taken from pages that really did come back lettered.
-  const lettered = [
-    ['DOG TREATS', 46, 300, 700],
-    ['DOGS MAKE LIFE BETTER', 30, 120, 180],
-    ['DOG LOVER', 40, 80, 760],
-    ['LOVE IS A WET NOSE', 26, 260, 840],
-    ['STOP DROP ROLL', 52, 240, 120],
-    ['OPEN', 60, 520, 300]
-  ];
+  console.log('\nReal pages that came back with words on them');
+  // p01 DOG TREATS / LOVE IS A WET NOSE & WARM COOKIES, p04 and p08 LOVE DOGS,
+  // p10 DOG LOVER, p11 DOG MOM, p15 DOGS MAKE LIFE BETTER.
+  const lettered = fixtures('words');
+  check('all six are present', lettered.length, 6);
 
   const missed = [];
-  for (let i = 0; i < lettered.length; i++) {
-    const [text, size, x, y] = lettered[i];
-    // Spread across different pages so a result cannot come from one drawing.
-    const page = path.join(SAMPLES_DIR, pages[i % pages.length]);
-    if (!await hasWords(await letterOver(page, text, size, x, y))) missed.push(text);
+  for (const page of lettered) {
+    if (!await hasWords(fs.readFileSync(path.join(FIXTURES, 'words', page)))) missed.push(page);
   }
-  check('every one of them is caught', missed, []);
+  check('every one is caught', missed, []);
 
-  // Three would also catch a pair of eyes and the mask between them, which is
-  // how rail-02 got held back before this was raised.
-  check('a word is four letters or more', WORD_LENGTH >= 4, true);
+  console.log('\nReal pages with no words on them');
+  const clean = fixtures('no-words');
+  check('all twelve are present', clean.length, 12);
+
+  const falseAlarms = [];
+  for (const page of clean) {
+    if (await hasWords(fs.readFileSync(path.join(FIXTURES, 'no-words', page)))) falseAlarms.push(page);
+  }
+  check('none is mistaken for writing', falseAlarms, []);
 
   console.log('\nThe mirror itself');
 
-  // The check is only worth having if maybeMirror actually obeys it. Sixty
-  // throws of a coin that lands heads half the time: a page that still gets
-  // flipped once is the bug back.
+  // Mirroring ships off, so testing maybeMirror as configured would prove
+  // nothing. Force it fully on: then every call takes the flip path and the
+  // only thing standing between a lettered page and a reversed one is the
+  // word check - which is exactly what needs proving.
+  process.env.MIRROR_CHANCE = '1';
   const { maybeMirror } = require('../server.js');
-  const clean = await sharp(path.join(SAMPLES_DIR, pages[0])).resize(1024, 1024).png().toBuffer();
-  const signed = await letterOver(path.join(SAMPLES_DIR, pages[0]), 'DOG TREATS', 46, 200, 300);
 
-  async function flipsIn(buffer, rounds) {
-    const before = buffer.toString('base64');
+  async function flipsIn(file, rounds) {
+    const before = fs.readFileSync(file).toString('base64');
     let flipped = 0;
     for (let i = 0; i < rounds; i++) {
       if (await maybeMirror(before) !== before) flipped++;
@@ -107,11 +86,16 @@ async function main() {
     return flipped;
   }
 
-  check('a lettered page is never flipped', await flipsIn(signed, 60), 0);
-  // Loose on purpose - this is a coin flip, and a tight range would fail on
-  // nothing but luck. It is here to catch the check refusing every page.
-  const clearFlips = await flipsIn(clean, 60);
-  check('a page with no words still gets flipped', clearFlips > 10 && clearFlips < 50, true);
+  // Sixty throws with the coin removed. One flip here is a book of backwards
+  // writing in the post.
+  check('a page with writing is never flipped',
+    await flipsIn(path.join(FIXTURES, 'words', 'dogwalk-p15.webp'), 60), 0);
+  // And the feature still works when it is turned on, rather than the guard
+  // quietly refusing everything.
+  check('a page with no words still flips',
+    await flipsIn(path.join(FIXTURES, 'no-words', 'owen-p09.webp'), 10), 10);
+
+  check('three letters make a word', WORD_LENGTH, 3);
 
   console.log('\nWhat happens when the check cannot run');
   let threw = false;
@@ -120,7 +104,7 @@ async function main() {
   } catch (err) {
     threw = true;
   }
-  // server.js catches this and keeps the page unflipped; the point here is that
+  // server.js catches this and keeps the page unflipped. The point here is that
   // it raises rather than quietly answering "no words, go ahead and flip".
   check('unreadable input raises instead of passing', threw, true);
 
