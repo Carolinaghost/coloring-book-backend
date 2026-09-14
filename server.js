@@ -390,8 +390,18 @@ app.get('/orders/:id/pages', async (req, res) => {
 });
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_API_KEY) {
+// Some places hand the key to the outbound proxy rather than to us: the
+// credential is attached to requests for api.openai.com on the way out and
+// never appears in the environment, so there is nothing here to read and
+// nothing to check. A missing key is only a misconfiguration when there is no
+// such proxy in front of us - on Render there is not, and it should still say
+// so loudly rather than fail one page at a time.
+const KEY_FROM_PROXY = !OPENAI_API_KEY && !!(process.env.HTTPS_PROXY || process.env.https_proxy);
+const CAN_CALL_OPENAI = Boolean(OPENAI_API_KEY) || KEY_FROM_PROXY;
+if (!CAN_CALL_OPENAI) {
   console.warn('Warning: OPENAI_API_KEY is not set. Add it as an environment variable before deploying.');
+} else if (KEY_FROM_PROXY) {
+  console.log('OpenAI key comes from the outbound proxy, not the environment.');
 }
 
 const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands - never fill hair with solid black, dense scribbles or crosshatching, no matter how dark or curly the hair is in the photo. Every part of the drawing must be left white so a child can color it in.';
@@ -720,7 +730,7 @@ async function maybeMirror(b64) {
 
 async function renderScene({ buffer, mimetype, filename, prompt, paid }) {
   await waitForImageSlot(paid === true);
-  if (!OPENAI_API_KEY) throw new Error('Server is missing its OpenAI API key.');
+  if (!CAN_CALL_OPENAI) throw new Error('Server is missing its OpenAI API key.');
 
   const form = new FormData();
   form.append('model', 'gpt-image-2');
@@ -731,7 +741,7 @@ async function renderScene({ buffer, mimetype, filename, prompt, paid }) {
 
   const response = await fetch('https://api.openai.com/v1/images/edits', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+    headers: OPENAI_API_KEY ? { Authorization: `Bearer ${OPENAI_API_KEY}` } : {},
     body: form
   });
   const data = await response.json();
@@ -971,7 +981,7 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: 'No photo uploaded.' });
     }
-    if (!OPENAI_API_KEY) {
+    if (!CAN_CALL_OPENAI) {
       return res.status(500).json({ error: 'Server is missing its OpenAI API key.' });
     }
 
@@ -1179,4 +1189,4 @@ if (require.main === module) {
   setInterval(resumeUnfinished, 60 * 1000);
 }
 
-module.exports = { app, buildPrompt, renderScene, maybeMirror, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
+module.exports = { app, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
