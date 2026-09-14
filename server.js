@@ -1111,6 +1111,23 @@ app.post('/convert', upload.fields([
     if (!singlePhoto && !familyPhotos.length) {
       return res.status(400).json({ error: 'No photo uploaded.' });
     }
+
+    // Sent as JSON text because this request is multipart, not JSON. A family
+    // needs a name per photo; without them the model has no way to tell the
+    // photos apart, so a mismatch is refused rather than guessed at.
+    let cast = [];
+    if (req.body.people) {
+      try {
+        cast = cleanPeople(JSON.parse(req.body.people));
+      } catch (err) {
+        return res.status(400).json({ error: 'Could not read the list of people.' });
+      }
+    }
+    if (familyPhotos.length && cast.length !== familyPhotos.length) {
+      return res.status(400).json({
+        error: `Send one name per photo: ${familyPhotos.length} photo(s) but ${cast.length} name(s).`
+      });
+    }
     if (!CAN_CALL_OPENAI) {
       return res.status(500).json({ error: 'Server is missing its OpenAI API key.' });
     }
@@ -1159,23 +1176,6 @@ app.post('/convert', upload.fields([
     childCount = Math.min(Math.max(childCount, 1), 3);
     const subjectType = req.body.subjectType === 'adult' ? 'adult' : 'kid';
     const notes = (req.body.notes || '').slice(0, 300);
-
-    // Sent as JSON text because this request is multipart, not JSON. A family
-    // needs a name per photo; without them the model has no way to tell the
-    // photos apart, so a mismatch is refused rather than guessed at.
-    let cast = [];
-    if (req.body.people) {
-      try {
-        cast = cleanPeople(JSON.parse(req.body.people));
-      } catch (err) {
-        return res.status(400).json({ error: 'Could not read the list of people.' });
-      }
-    }
-    if (familyPhotos.length && cast.length !== familyPhotos.length) {
-      return res.status(400).json({
-        error: `Send one name per photo: ${familyPhotos.length} photo(s) but ${cast.length} name(s).`
-      });
-    }
 
     const prompt = buildPrompt(theme, sceneIndex, childCount, subjectType, notes, cast);
 
