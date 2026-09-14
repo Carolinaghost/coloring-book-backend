@@ -25,10 +25,9 @@ const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
 // A family book is the same fifteen pages but several photos and a harder job,
-// so it can carry its own price. Defaults to the ordinary price rather than a
-// number nobody chose - set FAMILY_PRICE_CENTS when you have decided what a
-// family book is worth.
-const FAMILY_PRICE_CENTS = parseInt(process.env.FAMILY_PRICE_CENTS, 10) || PRICE_CENTS;
+// so it carries its own price: $25 against $15 for a single subject.
+// FAMILY_PRICE_CENTS overrides it without a deploy.
+const FAMILY_PRICE_CENTS = parseInt(process.env.FAMILY_PRICE_CENTS, 10) || 2500;
 // How many pages to draw at the same time. One at a time meant ~37s x 15 pages,
 // nearly ten minutes of waiting. Raise carefully: too many at once and OpenAI
 // starts rate limiting, which shows up as failed pages.
