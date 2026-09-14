@@ -112,7 +112,11 @@ const MIGRATIONS = [
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS render_attempts INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS visitor TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''",
-  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''"
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''",
+  // A family book: one entry per person, each with their own photo, in the
+  // order the pages should introduce them. Null for a single-subject book,
+  // which still uses child_count, subject_type and the one photo column.
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS people TEXT"
 ];
 
 const CREATE_INDEX_SQL = `
@@ -163,6 +167,28 @@ function status() {
 }
 
 // Convert a database row into the shape the front end already expects.
+// Bad JSON in this column must not take down a whole order listing, so a row
+// that cannot be read comes back as a plain book rather than an exception.
+//
+// Photos are left out unless asked for, the same way the single photo column is:
+// a listing wants to know who is in the book, not to carry a megabyte of
+// someone's family around with it.
+function parsePeopleColumn(value, withPhotos) {
+  if (!value) return [];
+  let parsed;
+  try {
+    parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  } catch (err) {
+    console.error('Could not read the people column on an order:', err.message);
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((person) => (withPhotos ? person : {
+    name: person && person.name,
+    subjectType: person && person.subjectType
+  }));
+}
+
 function rowToOrder(row) {
   return {
     id: row.id,
@@ -183,6 +209,9 @@ function rowToOrder(row) {
     visitor: row.visitor || '',
     source: row.source || '',
     campaign: row.campaign || '',
+    // Stored as JSON text. A row written before family books existed has none,
+    // and every caller treats an empty list as "not a family book".
+    people: parsePeopleColumn(row.people, false),
     submittedAt: new Date(row.submitted_at).toISOString()
   };
 }
@@ -205,8 +234,8 @@ async function saveOrder(order) {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token, photo, subject_type, visitor, source, campaign)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token, photo, subject_type, visitor, source, campaign, people)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING *`,
     [
       order.childName,
@@ -221,7 +250,8 @@ async function saveOrder(order) {
       order.subjectType === 'adult' ? 'adult' : 'kid',
       order.visitor || '',
       order.source || '',
-      order.campaign || ''
+      order.campaign || '',
+      order.people && order.people.length ? JSON.stringify(order.people) : null
     ]
   );
   const saved = rowToOrder(rows[0]);
@@ -392,6 +422,9 @@ async function getOrderForRender(id) {
   if (!rows[0]) return null;
   const order = rowToOrder(rows[0]);
   order.photo = rows[0].photo;
+  // Drawing is the one place that needs the faces, so this is the one place
+  // they are handed over.
+  order.people = parsePeopleColumn(rows[0].people, true);
   order.accessToken = rows[0].access_token;
   return order;
 }
