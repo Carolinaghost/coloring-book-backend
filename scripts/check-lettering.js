@@ -1,7 +1,18 @@
 #!/usr/bin/env node
 // Does a blunter instruction stop the model writing on things?
 //
-//   OPENAI_API_KEY=sk-... node scripts/check-lettering.js --photo ./her.jpg
+//   node scripts/check-lettering.js --photo ./her.jpg
+//
+// Needs an OpenAI credential: either OPENAI_API_KEY in the environment, or an
+// outbound proxy that attaches one to api.openai.com on the way out.
+//
+// Behind a proxy, two things bite. Node's built-in fetch ignores HTTPS_PROXY
+// unless you run with NODE_USE_ENV_PROXY=1. And a proxy may cut the request off
+// before the drawing is finished - measured against ours, a medium-quality page
+// takes about 31 seconds and is dropped at 30, while a low-quality one finishes
+// in 18 and succeeds. If pages keep failing with "upstream request failed"
+// after roughly half a minute, that is the ceiling, not the prompt. Run it
+// somewhere without a proxy in between.
 //
 // BASE_STYLE used to say only "no text or captions", and the model lettered
 // signs, jars and cushions in spite of it - four pages in a sixty-page run
@@ -30,7 +41,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { buildPrompt, renderScene, STORY_SCENES, BASE_STYLE } = require('../server');
+const { buildPrompt, renderScene, canCallOpenAI, STORY_SCENES, BASE_STYLE } = require('../server');
 const { hasWords } = require('../mirror-guard');
 
 // What BASE_STYLE said before the no-writing clause went in. Kept here as the
@@ -54,7 +65,7 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.photo) throw new Error('Pass a reference photo: --photo ./her.jpg');
-  if (!process.env.OPENAI_API_KEY) throw new Error('Set OPENAI_API_KEY first.');
+  if (!canCallOpenAI) throw new Error('No OpenAI credential. Set OPENAI_API_KEY, or run somewhere the outbound proxy attaches one.');
 
   const theme = args.theme || 'Family Keepsake';
   if (!STORY_SCENES[theme]) {
@@ -81,7 +92,7 @@ async function main() {
 
   console.log(`Theme "${theme}", ${subjectType}, scenes ${scenes.map((n) => n + 1).join(',')}`);
   console.log(`Notes: ${notes || '(none)'}`);
-  console.log(`${scenes.length * variants.length} image call(s) against your key.\n`);
+  console.log(`${scenes.length * variants.length} image call(s) against your account.\n`);
 
   const tally = {};
   const prompts = [];

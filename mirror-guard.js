@@ -20,14 +20,22 @@
 // separate small marks of a common size, sitting in a row between a shared
 // cap-line and a shared baseline.
 //
-// KNOWN LIMIT, please read before trusting this. Coloring pages are full of
-// rows of similar aligned strokes - hair curls, knit ribbing, castle
-// crenellations, grass, fence palings - and this flags a fair number of them.
-// Measured on 63 pages with no words: 14 flagged. That is the cheap direction
-// (one page keeps the lean it was drawn with) and it is tuned that way on
-// purpose. The expensive direction is a miss, and the honest position is that
-// six real lettered pages is not enough evidence to promise there are none.
-// If mirroring matters more than that uncertainty, put OCR behind it instead.
+// KNOWN LIMIT, please read before trusting this. Measured over the sixty pages
+// of a real generation run: all six lettered pages caught, and eight of the
+// fifty-four clean ones flagged as well - hair curls, knit ribbing, castle
+// crenellations, grass. So about one clean page in seven never gets flipped.
+// That is the cheap direction and it is tuned that way on purpose; a miss is
+// the expensive one.
+//
+// WORD_LENGTH sits right on the edge and cannot simply be raised. Every one of
+// those eight false alarms scores exactly 3 - but so do two of the six real
+// catches (dogwalk-p10, p11). Moving it to 4 would clear all eight and lose
+// those two, which is the wrong trade. Anything touched here gets re-measured
+// against those sixty pages, not against lettering drawn by hand.
+//
+// And six lettered pages is still not enough to promise a seventh kind of
+// lettering gets caught. If mirroring matters more than that uncertainty, put
+// OCR behind it instead.
 
 const sharp = require('sharp');
 

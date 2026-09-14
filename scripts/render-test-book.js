@@ -3,7 +3,10 @@
 // the same OpenAI call the paid flow uses, and writes the pages to disk so you
 // can look at them before promoting anything.
 //
-//   OPENAI_API_KEY=sk-... node scripts/render-test-book.js --photo ./kids.jpg --kids 2
+//   node scripts/render-test-book.js --photo ./kids.jpg --kids 2
+//
+// Needs an OpenAI credential: either OPENAI_API_KEY in the environment, or an
+// outbound proxy that attaches one to api.openai.com on the way out.
 //
 // Options:
 //   --photo <path>    reference photo (required)
@@ -14,12 +17,12 @@
 //   --notes <text>    the customer's extra detail, if any
 //   --out <dir>       where to write the pages             (default ./test-book)
 //
-// Every page is one image API call against your key, so a full book costs a
+// Every page is one image API call against your account, so a full book costs a
 // full book. Use --pages while you are still iterating on wording.
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { buildPrompt, renderScene, STORY_SCENES } = require('../server');
+const { buildPrompt, renderScene, canCallOpenAI, STORY_SCENES } = require('../server');
 
 function parseArgs(argv) {
   const args = {};
@@ -35,7 +38,7 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.photo) throw new Error('Pass a reference photo: --photo ./kids.jpg');
-  if (!process.env.OPENAI_API_KEY) throw new Error('Set OPENAI_API_KEY first.');
+  if (!canCallOpenAI) throw new Error('No OpenAI credential. Set OPENAI_API_KEY, or run somewhere the outbound proxy attaches one.');
 
   const theme = args.theme || 'Superhero';
   if (!STORY_SCENES[theme]) {

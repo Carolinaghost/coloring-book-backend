@@ -2,7 +2,10 @@
 // Renders ONE scene several different ways so you can see which prompt shape
 // actually breaks the model off the reference photo's camera angle.
 //
-//   OPENAI_API_KEY=sk-... node scripts/try-prompts.js --photo ./me.jpg --subject adult
+//   node scripts/try-prompts.js --photo ./me.jpg --subject adult
+//
+// Needs an OpenAI credential: either OPENAI_API_KEY in the environment, or an
+// outbound proxy that attaches one to api.openai.com on the way out.
 //
 // Several people, each run on their own - one person per photo, never combined
 // into a group scene. Pass a folder, or a comma-separated list:
@@ -28,6 +31,8 @@ const fs = require('fs');
 const path = require('path');
 const { STORY_SCENES, BASE_STYLE: STYLE } = require('../server');
 
+// May be absent: some environments hand the key to the outbound proxy, which
+// attaches it on the way out. Then there is nothing to read and nothing to send.
 const KEY = process.env.OPENAI_API_KEY;
 const MODEL = 'gpt-image-2';
 
@@ -110,7 +115,8 @@ function variants(scene, subject, notes) {
 }
 
 async function post(url, body, headers) {
-  const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${KEY}`, ...headers }, body });
+  const auth = KEY ? { Authorization: `Bearer ${KEY}` } : {};
+  const res = await fetch(url, { method: 'POST', headers: { ...auth, ...headers }, body });
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); }
@@ -157,7 +163,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const photos = collectPhotos(args.photos || args.photo);
   if (!photos.length) throw new Error('Pass a reference photo: --photo ./me.jpg, or --photos ./folder');
-  if (!KEY) throw new Error('Set OPENAI_API_KEY first.');
+  if (!require('../server').canCallOpenAI) throw new Error('No OpenAI credential. Set OPENAI_API_KEY, or run somewhere the outbound proxy attaches one.');
 
   const theme = args.theme || 'Family Keepsake';
   if (!STORY_SCENES[theme]) throw new Error(`Unknown theme "${theme}". Try: ${Object.keys(STORY_SCENES).join(', ')}`);
