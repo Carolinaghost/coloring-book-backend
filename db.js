@@ -230,7 +230,12 @@ async function saveOrder(order) {
       ...order
     };
     memoryOrders.push(saved);
-    return saved;
+    // A copy, not the stored record. The caller hands this to the browser and
+    // strips the access token off it first; handing back the stored object let
+    // that delete reach the store, and the order could never be authorised
+    // again - no checkout, no pages. Postgres has always returned a fresh
+    // object, so this only ever bit the in-memory path: local runs and CI.
+    return { ...saved };
   }
 
   const { rows } = await pool.query(

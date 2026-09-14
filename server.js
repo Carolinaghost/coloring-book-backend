@@ -311,6 +311,17 @@ app.post('/checkout', async (req, res) => {
       `${order.pageCount || 15} pages starring ${order.childName}`);
     if (isPrint) form.append('shipping_address_collection[allowed_countries][0]', 'US');
 
+    // Influencer codes. Stripe hosts the box, the codes live in the Stripe
+    // dashboard one per influencer, and the code someone types IS the
+    // attribution - Stripe reports sales per promotion code, so there is no
+    // affiliate software to run.
+    //
+    // This has to be appended before the consent copy below is taken, or only
+    // one of the two sessions carries it and the box disappears on whichever
+    // path was missed. Never add a discounts[] parameter alongside it: Stripe
+    // rejects a session that sets both.
+    form.append('allow_promotion_codes', 'true');
+
     // Make the customer tick a box agreeing to immediate delivery before paying.
     // Stripe records the acceptance against the payment, which is the evidence
     // that matters if anyone later disputes the charge. It needs a terms URL set
