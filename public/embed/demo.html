@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sample scatter &mdash; reference page</title>
+<!--
+  What the site needs to copy is the markup inside <main> below, plus the one
+  script tag at the bottom. Everything in this <style> block is only here so
+  the page looks like something on its own - the real site keeps its own CSS.
+
+  Open it against a running server:  http://localhost:3000/embed/demo.html
+-->
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding-inline: 20px;
+    padding-block: 0 60px;
+    background: #FBF6EA;
+    color: #2A2724;
+    font: 16px/1.6 'Libre Franklin', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #18150F; color: #F0E7D6; }
+    .offer { background: #221E17; border-color: #F0E7D6; }
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: clamp(32px, 6vw, 54px); line-height: 1.05; text-align: center; margin: 0; }
+  .head { padding-block: 52px 0; text-align: center; }
+  .head p { max-width: 34em; margin: 14px auto 0; opacity: .75; }
+
+  /* The stage needs room around the block, or there is no free space for a
+     page to land in. This padding is the whole trick. */
+  .stage { padding-block: clamp(74px, 11vw, 132px); }
+
+  .offer {
+    max-width: 620px;
+    margin-inline: auto;
+    background: #fff;
+    border: 2px solid currentColor;
+    border-radius: 8px;
+    padding: clamp(24px, 4vw, 44px);
+    text-align: center;
+  }
+  .offer h2 { font-size: clamp(22px, 3.4vw, 32px); margin: 0 0 12px; line-height: 1.15; }
+  .offer p { margin: 0; opacity: .75; }
+  .cta {
+    display: inline-block;
+    margin-top: 26px;
+    background: #E8622C;
+    color: #fff;
+    font-weight: 700;
+    text-decoration: none;
+    padding: 13px 30px;
+    border-radius: 6px;
+  }
+  .cta:focus-visible { outline: 3px solid #2F5FA8; outline-offset: 3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="head">
+    <h1>This is what you get</h1>
+    <p>Fifteen pages, drawn from one photo, with your child on every single one.</p>
+  </div>
+
+  <main>
+    <!-- Copy from here ------------------------------------------------- -->
+    <div class="stage" data-sample-scatter>
+      <div class="offer" data-sample-block>
+        <h2>A whole book, not a sample pack</h2>
+        <p>Upload one photo, pick a story, and the pages come back drawn as
+           clean line art a child can colour straight in.</p>
+        <a class="cta" href="#">See my free preview</a>
+      </div>
+    </div>
+    <!-- to here, and add the script tag below ------------------------- -->
+  </main>
+
+</div>
+
+<script src="../embed/sample-scatter.js" defer></script>
+<!-- On the real site, point it at the backend:
+     <script src="https://your-backend/embed/sample-scatter.js" defer></script> -->
+</body>
+</html>

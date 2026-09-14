@@ -5,7 +5,10 @@ const multer = require('multer');
 const cors = require('cors');
 const db = require('./db');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const mailer = require('./mailer');
+const mirrorGuard = require('./mirror-guard');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
@@ -674,16 +677,27 @@ async function waitForImageSlot(paid) {
 // Roughly half, decided per page - a coin flip, which is what "roughly" means
 // here; over fifteen pages it lands near enough to half.
 //
-// Safe to do blind because the page has no text in it: BASE_STYLE rules out
-// text and captions, so there is no lettering to come back mirrored. If that
-// ever changes, this has to change with it.
+// This used to be done blind, on the grounds that BASE_STYLE rules out text and
+// captions so there would be no lettering to come back mirrored. The model does
+// not honour that: it writes on signs, jars, cushions and shop fronts anyway,
+// and those pages came back reading right to left. So every page is now read
+// for words first, and a page with writing on it is left as drawn.
 const MIRROR_CHANCE = 0.5;
 
 async function maybeMirror(b64) {
   if (Math.random() >= MIRROR_CHANCE) return b64;
+  const buffer = Buffer.from(b64, 'base64');
+  try {
+    if (await mirrorGuard.hasWords(buffer)) return b64;
+  } catch (err) {
+    // Unreadable means unflippable. Leaning the same way is a page nobody
+    // notices; backwards writing is a page that gets sent back.
+    console.error('Could not check the page for words, leaving it as drawn -', err.message);
+    return b64;
+  }
   try {
     // flop is the horizontal mirror; flip is vertical.
-    const mirrored = await sharp(Buffer.from(b64, 'base64')).flop().png().toBuffer();
+    const mirrored = await sharp(buffer).flop().png().toBuffer();
     return mirrored.toString('base64');
   } catch (err) {
     // A page that came back fine is worth more than a page that leans the right
@@ -1034,6 +1048,36 @@ app.post('/convert', upload.single('photo'), async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Sample pages for the site
+// ---------------------------------------------------------------------------
+// Finished pages from books we rendered ourselves, served so the site can
+// scatter them around its "this is what you get" block. They are AI-generated
+// stand-ins, not customer work - keep it that way unless a customer puts it in
+// writing.
+//
+// Read once at boot rather than per request: the folder only changes when we
+// deploy, and this route is hit by every visitor.
+const SAMPLES_DIR = path.join(__dirname, 'public', 'samples');
+const SAMPLE_PAGES = (() => {
+  try {
+    return fs.readdirSync(SAMPLES_DIR).filter((f) => f.endsWith('.webp')).sort();
+  } catch (err) {
+    // No folder is not a broken server - the site just shows its block bare.
+    console.warn('No sample pages found:', err.message);
+    return [];
+  }
+})();
+
+app.get('/samples.json', (req, res) => {
+  res.json({ base: '/samples/', pages: SAMPLE_PAGES });
+});
+
+// Content-hashed they are not, but the names are stable and the files only
+// change on deploy, so a long cache is safe and saves the bandwidth.
+app.use('/samples', express.static(SAMPLES_DIR, { maxAge: '30d', immutable: true }));
+app.use('/embed', express.static(path.join(__dirname, 'public', 'embed'), { maxAge: '1h' }));
+
 app.get('/', (req, res) => {
   res.send('Coloring book conversion server is running.');
 });
@@ -1124,4 +1168,4 @@ if (require.main === module) {
   setInterval(resumeUnfinished, 60 * 1000);
 }
 
-module.exports = { app, buildPrompt, renderScene, STORY_SCENES, SHOTS, BASE_STYLE };
+module.exports = { app, buildPrompt, renderScene, maybeMirror, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
