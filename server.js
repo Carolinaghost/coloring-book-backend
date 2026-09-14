@@ -394,7 +394,7 @@ if (!OPENAI_API_KEY) {
   console.warn('Warning: OPENAI_API_KEY is not set. Add it as an environment variable before deploying.');
 }
 
-const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions, simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands - never fill hair with solid black, dense scribbles or crosshatching, no matter how dark or curly the hair is in the photo. Every part of the drawing must be left white so a child can color it in.';
+const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands - never fill hair with solid black, dense scribbles or crosshatching, no matter how dark or curly the hair is in the photo. Every part of the drawing must be left white so a child can color it in.';
 
 // The photo goes to the model through /images/edits, which by default hands
 // back something close to the photo it was given: same pose, same crop, same

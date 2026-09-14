@@ -3,16 +3,15 @@
 //
 //   OPENAI_API_KEY=sk-... node scripts/check-lettering.js --photo ./her.jpg
 //
-// BASE_STYLE already says "no text or captions" and the model letters signs,
-// jars and cushions anyway - four pages in a sixty-page run shipped with the
-// writing mirrored. Detecting that lettering afterwards turned out to be hard
-// (mirror-guard.js, and the note at the top of it). Not producing it in the
-// first place would make the whole problem go away, so it is worth one run
-// before building anything cleverer.
+// BASE_STYLE used to say only "no text or captions", and the model lettered
+// signs, jars and cushions in spite of it - four pages in a sixty-page run
+// shipped with the writing mirrored. Detecting that lettering afterwards turned
+// out to be hard (mirror-guard.js, and the note at the top of it), so
+// BASE_STYLE now names the objects and tells the model to leave them blank.
 //
-// This renders the same scenes twice, once with the wording production sends
-// today and once with the candidate below, and reports how many pages came
-// back with writing on them.
+// Whether that worked is an open question until somebody renders pages. This
+// puts the old wording and the shipped wording through the same scenes and
+// reports how many pages came back with writing on them.
 //
 // Options:
 //   --photo <path>      reference photo (required)
@@ -24,7 +23,7 @@
 //   --notes <text>      default "she loves her dog" - the note is what turned
 //                       the props into DOG TREATS and DOG MOM, so a run
 //                       without it does not reproduce the conditions
-//   --variants <list>   current,blank (default both)
+//   --variants <list>   before,after (default both)
 //   --out <dir>         default ./lettering-check
 //
 // Cost: scenes x variants image calls. The default is 12.
@@ -34,16 +33,11 @@ const path = require('path');
 const { buildPrompt, renderScene, STORY_SCENES, BASE_STYLE } = require('../server');
 const { hasWords } = require('../mirror-guard');
 
-// The candidate. BASE_STYLE's "no text or captions" is a rule about the page;
-// this names the things the model actually writes on, because that is where it
-// has been putting words in spite of the rule.
-const BLANK_STYLE = BASE_STYLE.replace(
-  'no text or captions,',
-  'no text or captions - leave every sign, label, jar, tin, box, book cover, '
-  + 'cushion, picture frame, poster, banner, gift tag and shop front completely '
-  + 'blank, with no letters, words, numbers, monograms or pretend scribbled '
-  + 'writing anywhere in the picture, not even on objects that would normally '
-  + 'carry them -'
+// What BASE_STYLE said before the no-writing clause went in. Kept here as the
+// control: without it this compares the shipped prompt against itself.
+const OLD_STYLE = BASE_STYLE.replace(
+  /no text or captions of any kind - .*? anywhere in the picture - simple line art/,
+  'no text or captions, simple line art'
 );
 
 function parseArgs(argv) {
@@ -73,11 +67,11 @@ async function main() {
   const notes = args.notes === undefined ? 'she loves her dog'
     : (args.notes === 'true' ? '' : args.notes);
   const outDir = args.out || './lettering-check';
-  const wanted = (args.variants && args.variants !== 'true' ? args.variants : 'current,blank').split(',');
+  const wanted = (args.variants && args.variants !== 'true' ? args.variants : 'before,after').split(',');
 
   const variants = [
-    { name: 'current', style: BASE_STYLE, note: 'what production sends today' },
-    { name: 'blank', style: BLANK_STYLE, note: 'names the objects to leave blank' }
+    { name: 'before', style: OLD_STYLE, note: 'the wording that let the lettering through' },
+    { name: 'after', style: BASE_STYLE, note: 'what production sends now' }
   ].filter((v) => wanted.includes(v.name));
 
   const buffer = fs.readFileSync(args.photo);
@@ -137,8 +131,14 @@ async function main() {
   console.log('clean page in five. Open the pages before believing a number either way.');
   console.log(`Pages and prompts are in ${outDir}.`);
   console.log('');
-  console.log('If "blank" comes back clean and "current" does not, move BLANK_STYLE into');
-  console.log('BASE_STYLE in server.js - that is the whole fix, and mirroring can go back on.');
+  console.log('If "after" is clean and "before" is not, the wording did its job and mirroring');
+  console.log('can go back on: MIRROR_CHANCE=0.5, with the word check as a backstop rather');
+  console.log('than the whole defence. If "after" still letters pages, the wording is not');
+  console.log('enough on its own - leave mirroring off and put OCR behind it instead.');
+  console.log('');
+  console.log('Worth a look while the pages are open: the no-writing clause made BASE_STYLE');
+  console.log('longer, and a longer style can crowd out the rules after it. Check the hair is');
+  console.log('still open white space and the pages are not copying the photo.');
 }
 
 main().catch((err) => {
