@@ -113,6 +113,37 @@ async function main() {
       fallbackBody.get('consent_collection[terms_of_service]'), null);
     check('the order is still referenced', consentBody.get('client_reference_id'), String(order.order.id));
     check('and it is still charged', consentBody.get('line_items[0][price_data][unit_amount]'), '1500');
+
+    console.log('\nA family book costs more');
+
+    // The number here and the number the site shows come from the same place
+    // (GET /options). If they ever disagree, a customer is quoted one price and
+    // charged another.
+    sent.length = 0;
+    const familyOrder = JSON.parse((await request(server, '/orders', {
+      method: 'POST',
+      body: JSON.stringify({
+        childName: 'Leo', email: 'a@b.test', theme: 'Portrait', pageCount: 15,
+        people: [
+          { name: 'Leo', subjectType: 'kid', star: true, photo: 'data:image/png;base64,iVBORw0KGgo=' },
+          { name: 'Mum', subjectType: 'adult', photo: 'data:image/png;base64,iVBORw0KGgo=' }
+        ]
+      })
+    })).body);
+    await request(server, '/checkout', {
+      method: 'POST',
+      body: JSON.stringify({ orderId: familyOrder.order.id, token: familyOrder.accessToken, product: 'digital' })
+    });
+    const familyBody = sent[sent.length - 1];
+    check('a family book is charged the family price',
+      familyBody.get('line_items[0][price_data][unit_amount]'), '2500');
+    check('and Stripe names it as one',
+      /family/i.test(familyBody.get('line_items[0][price_data][product_data][name]') || ''), true);
+
+    const options = JSON.parse((await request(server, '/options')).body);
+    check('the site is told the same family price', String(options.family.priceCents), '2500');
+    check('and the same single price', String(options.priceCents), '1500');
+    check('a family book still offers the code box', familyBody.get('allow_promotion_codes'), 'true');
   } finally {
     restore();
     server.close();
