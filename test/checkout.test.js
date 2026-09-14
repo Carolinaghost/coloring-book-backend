@@ -5,21 +5,31 @@
 //
 //   npm test
 //
-// Chiefly one thing: the promotion code box. Influencer codes are created in
-// the Stripe dashboard and the code someone types is the attribution, so if
-// allow_promotion_codes goes missing there is no code box, no discount, and no
-// way to tell whose audience bought - and nothing fails loudly enough to
-// notice. It is one line in a long form body, easy to lose in a merge.
+// Two things, both of which fail silently.
 //
-// It also has to survive the fallback. /checkout tries a session that collects
-// consent first, and retries without it if Stripe refuses. The consent body is
-// a copy of the form taken partway through, so anything appended after that
-// copy reaches only one of the two. Both are checked here.
+// The promotion code box. Influencer codes are created in the Stripe dashboard
+// and the code someone types is the attribution, so if allow_promotion_codes
+// goes missing there is no code box, no discount, and no way to tell whose
+// audience bought - and nothing fails loudly enough to notice. It is one line
+// in a long form body, easy to lose in a merge.
+//
+// The card statement descriptor. This account is managed under Bluevine and
+// has no descriptor field in its dashboard, so the session is the only place
+// it can be set, and a charge nobody recognises is a chargeback.
+//
+// Both have to survive the fallbacks. /checkout tries the best session first
+// and drops one refusable thing per rung - consent, then the descriptor - so a
+// Stripe account that refuses either still takes the money. Anything appended
+// to only one rung disappears on the others, which is why each rung is checked
+// here rather than just the first.
 
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_not_a_real_key';
 
 const http = require('http');
-const { app } = require('../server.js');
+const { app, STATEMENT_DESCRIPTOR_SUFFIX } = require('../server.js');
+
+const DESCRIPTOR = 'payment_intent_data[statement_descriptor_suffix]';
+const CONSENT = 'consent_collection[terms_of_service]';
 
 let pass = 0;
 const failures = [];
@@ -51,21 +61,19 @@ function request(server, path, { method = 'GET', body } = {}) {
   });
 }
 
-// Stand in for Stripe and keep every body it is sent. The first call is
-// refused so the fallback runs too, which is the path that would otherwise
-// never be looked at.
-function captureStripe(sent) {
+// Stand in for Stripe and keep every body it is sent. `refuse` decides what
+// this pretend account will not accept, so each real-world case can be played
+// out: an account with no terms URL, a managed account that rejects
+// descriptors, and one that does both.
+function captureStripe(sent, refuse) {
   const realFetch = global.fetch;
   global.fetch = async (url, opts) => {
     if (String(url).includes('api.stripe.com')) {
       const body = opts.body instanceof URLSearchParams ? opts.body.toString() : String(opts.body);
-      sent.push(new URLSearchParams(body));
-      if (sent.length === 1) {
-        return {
-          ok: false,
-          json: async () => ({ error: { message: 'no terms of service url set (pretend)' } })
-        };
-      }
+      const params = new URLSearchParams(body);
+      sent.push(params);
+      const reason = refuse ? refuse(params) : null;
+      if (reason) return { ok: false, json: async () => ({ error: { message: reason } }) };
       return { ok: true, json: async () => ({ id: 'cs_test_123', url: 'https://checkout.stripe.test/c/pay/cs_test_123' }) };
     }
     return realFetch(url, opts);
@@ -73,79 +81,142 @@ function captureStripe(sent) {
   return () => { global.fetch = realFetch; };
 }
 
+const refusesConsent = (p) => p.get(CONSENT) ? 'no terms of service url set (pretend)' : null;
+const refusesDescriptor = (p) => p.get(DESCRIPTOR) ? 'no statement descriptor prefix set (pretend)' : null;
+const refusesBoth = (p) => refusesConsent(p) || refusesDescriptor(p);
+
 async function main() {
   const server = app.listen(0);
   await new Promise((r) => server.once('listening', r));
-  const sent = [];
-  const restore = captureStripe(sent);
+
+  // Every checkout in this file: place an order, pay for it, and hand back
+  // every body Stripe was sent, in the order the ladder tried them.
+  async function checkout(refuse, orderFields) {
+    const sent = [];
+    const restore = captureStripe(sent, refuse);
+    try {
+      const made = JSON.parse((await request(server, '/orders', {
+        method: 'POST',
+        body: JSON.stringify(Object.assign(
+          { childName: 'Ava', email: 'a@b.test', theme: 'Portrait', pageCount: 15 },
+          orderFields || {}))
+      })).body);
+      const res = await request(server, '/checkout', {
+        method: 'POST',
+        body: JSON.stringify({ orderId: made.order.id, token: made.accessToken, product: 'digital' })
+      });
+      return { res, sent, order: made.order, taken: sent[sent.length - 1] };
+    } finally {
+      restore();
+    }
+  }
 
   try {
-    console.log('\nStarting a checkout');
+    console.log('\nAn account that accepts everything');
 
-    const made = await request(server, '/orders', {
-      method: 'POST',
-      body: JSON.stringify({ childName: 'Ava', email: 'a@b.test', theme: 'Portrait', pageCount: 15 })
-    });
-    const order = JSON.parse(made.body);
-    check('an order can be created', made.status, 200);
-
-    const res = await request(server, '/checkout', {
-      method: 'POST',
-      body: JSON.stringify({ orderId: order.order.id, token: order.accessToken, product: 'digital' })
-    });
-    check('checkout answers', res.status, 200);
-    check('Stripe was asked twice - consent, then the fallback', sent.length, 2);
-
-    console.log('\nThe promotion code box');
-
-    const [consentBody, fallbackBody] = sent;
-    check('the consent session offers it', consentBody.get('allow_promotion_codes'), 'true');
-    check('and so does the fallback', fallbackBody.get('allow_promotion_codes'), 'true');
-
+    const happy = await checkout(null);
+    check('checkout answers', happy.res.status, 200);
+    // One sale, one request. The ladder must not cost a round trip per rung
+    // when nothing is wrong.
+    check('Stripe is asked once', happy.sent.length, 1);
+    check('the card descriptor is set', happy.taken.get(DESCRIPTOR), STATEMENT_DESCRIPTOR_SUFFIX);
+    check('consent is collected', happy.taken.get(CONSENT), 'required');
+    check('the promotion code box is offered', happy.taken.get('allow_promotion_codes'), 'true');
+    check('the order is referenced', happy.taken.get('client_reference_id'), String(happy.order.id));
+    check('and it is charged', happy.taken.get('line_items[0][price_data][unit_amount]'), '1500');
     // Stripe refuses a session that sets both, and the failure would only show
     // up when somebody tried to pay.
-    check('no discounts[] alongside it',
-      [...consentBody.keys(), ...fallbackBody.keys()].filter((k) => k.startsWith('discounts')), []);
+    check('no discounts[] alongside the code box',
+      [...happy.taken.keys()].filter((k) => k.startsWith('discounts')), []);
 
-    console.log('\nThe rest of the session is unchanged');
-    check('consent is still collected', consentBody.get('consent_collection[terms_of_service]'), 'required');
-    check('the fallback drops only the consent',
-      fallbackBody.get('consent_collection[terms_of_service]'), null);
-    check('the order is still referenced', consentBody.get('client_reference_id'), String(order.order.id));
-    check('and it is still charged', consentBody.get('line_items[0][price_data][unit_amount]'), '1500');
+    console.log('\nAn account with no terms URL');
+
+    // The old behaviour, still the likeliest: Stripe refuses the consent box.
+    const noTerms = await checkout(refusesConsent);
+    check('the sale still goes through', noTerms.res.status, 200);
+    // Two, not three: Stripe said the consent box was the problem, so the rung
+    // that still carried it was skipped rather than sent again.
+    check('it took two tries, not three', noTerms.sent.length, 2);
+    check('consent was dropped', noTerms.taken.get(CONSENT), null);
+    // The reason this file exists: the descriptor must not fall with it.
+    check('but the descriptor survived', noTerms.taken.get(DESCRIPTOR), STATEMENT_DESCRIPTOR_SUFFIX);
+    check('and so did the code box', noTerms.taken.get('allow_promotion_codes'), 'true');
+
+    console.log('\nA managed account that refuses descriptors');
+
+    // What Bluevine may well do, since it sets the prefix and we cannot see it.
+    const noDescriptor = await checkout(refusesDescriptor);
+    check('the sale still goes through', noDescriptor.res.status, 200);
+    check('the descriptor was dropped', noDescriptor.taken.get(DESCRIPTOR), null);
+    // Consent outranks it - it is the evidence that settles a chargeback.
+    check('consent was kept instead', noDescriptor.taken.get(CONSENT), 'required');
+    check('and the code box', noDescriptor.taken.get('allow_promotion_codes'), 'true');
+    check('two tries here too', noDescriptor.sent.length, 2);
+
+    console.log('\nAn account that refuses both');
+
+    const neither = await checkout(refusesBoth);
+    check('the sale STILL goes through', neither.res.status, 200);
+    check('with neither consent', neither.taken.get(CONSENT), null);
+    check('nor a descriptor', neither.taken.get(DESCRIPTOR), null);
+    // Whatever else is dropped, these three are what the customer is buying
+    // and what pays the influencer. They ride every rung.
+    check('the code box is still there', neither.taken.get('allow_promotion_codes'), 'true');
+    check('the price is untouched', neither.taken.get('line_items[0][price_data][unit_amount]'), '1500');
+    check('and the order is still referenced',
+      neither.taken.get('client_reference_id'), String(neither.order.id));
+    // Three: Stripe reports one objection at a time, so the descriptor cannot
+    // be known bad until a session is sent without the consent box.
+    check('no rung was sent twice over', neither.sent.length, 3);
+
+    console.log('\nWhen Stripe is simply broken');
+
+    // Nothing to do with consent or descriptors - the ladder must give up and
+    // report, not answer 200 with no checkout URL.
+    const broken = await checkout(() => 'Invalid API Key provided (pretend)');
+    check('the customer is told', broken.res.status, 502);
+    check('with the reason from Stripe', /Invalid API Key/.test(broken.res.body), true);
+    // It walked the whole ladder rather than giving up on the first refusal.
+    // An unreadable refusal must never be the thing that blocks a sale, so this
+    // is deliberate waste on a path that is already broken.
+    check('it tried everything before giving up', broken.sent.length, 4);
 
     console.log('\nA family book costs more');
 
     // The number here and the number the site shows come from the same place
     // (GET /options). If they ever disagree, a customer is quoted one price and
     // charged another.
-    sent.length = 0;
-    const familyOrder = JSON.parse((await request(server, '/orders', {
-      method: 'POST',
-      body: JSON.stringify({
-        childName: 'Leo', email: 'a@b.test', theme: 'Portrait', pageCount: 15,
-        people: [
-          { name: 'Leo', subjectType: 'kid', star: true, photo: 'data:image/png;base64,iVBORw0KGgo=' },
-          { name: 'Mum', subjectType: 'adult', photo: 'data:image/png;base64,iVBORw0KGgo=' }
-        ]
-      })
-    })).body);
-    await request(server, '/checkout', {
-      method: 'POST',
-      body: JSON.stringify({ orderId: familyOrder.order.id, token: familyOrder.accessToken, product: 'digital' })
+    const family = await checkout(null, {
+      childName: 'Leo',
+      people: [
+        { name: 'Leo', subjectType: 'kid', star: true, photo: 'data:image/png;base64,iVBORw0KGgo=' },
+        { name: 'Mum', subjectType: 'adult', photo: 'data:image/png;base64,iVBORw0KGgo=' }
+      ]
     });
-    const familyBody = sent[sent.length - 1];
     check('a family book is charged the family price',
-      familyBody.get('line_items[0][price_data][unit_amount]'), '2500');
+      family.taken.get('line_items[0][price_data][unit_amount]'), '2500');
     check('and Stripe names it as one',
-      /family/i.test(familyBody.get('line_items[0][price_data][product_data][name]') || ''), true);
+      /family/i.test(family.taken.get('line_items[0][price_data][product_data][name]') || ''), true);
+    check('a family book still offers the code box', family.taken.get('allow_promotion_codes'), 'true');
+    check('and carries the same descriptor', family.taken.get(DESCRIPTOR), STATEMENT_DESCRIPTOR_SUFFIX);
 
     const options = JSON.parse((await request(server, '/options')).body);
     check('the site is told the same family price', String(options.family.priceCents), '2500');
     check('and the same single price', String(options.priceCents), '1500');
-    check('a family book still offers the code box', familyBody.get('allow_promotion_codes'), 'true');
+
+    console.log('\nThe descriptor itself is one Stripe will take');
+
+    // Stripe rejects the whole session on any of these, and the rejection would
+    // only be discovered by a customer failing to check out.
+    check('no characters Stripe forbids',
+      /[<>\\'"*]/.test(STATEMENT_DESCRIPTOR_SUFFIX), false);
+    check('not only digits', /[a-z]/i.test(STATEMENT_DESCRIPTOR_SUFFIX), true);
+    check('not empty', STATEMENT_DESCRIPTOR_SUFFIX.trim().length > 0, true);
+    // The account prefix is prepended to this and the pair must fit 22
+    // characters. We cannot see the prefix, so leave it room.
+    check('short enough to leave room for the account prefix',
+      STATEMENT_DESCRIPTOR_SUFFIX.length <= 12, true);
   } finally {
-    restore();
     server.close();
   }
 

@@ -28,6 +28,17 @@ const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
 // so it carries its own price: $25 against $15 for a single subject.
 // FAMILY_PRICE_CENTS overrides it without a deploy.
 const FAMILY_PRICE_CENTS = parseInt(process.env.FAMILY_PRICE_CENTS, 10) || 2500;
+// What the charge is called on the customer's card statement. A charge nobody
+// recognises is a chargeback, and this Stripe account is managed under Bluevine
+// and offers no descriptor field in its dashboard, so per-session is the only
+// place it can be set at all.
+//
+// Stripe APPENDS this to the account's own descriptor prefix rather than
+// replacing it, and prefix and suffix together must fit 22 characters. We
+// cannot see this account's prefix, so a suffix that fits today may be refused
+// after Bluevine changes theirs - hence the env override, and hence /checkout
+// falling back to a session without it rather than failing the sale.
+const STATEMENT_DESCRIPTOR_SUFFIX = process.env.STATEMENT_DESCRIPTOR_SUFFIX || 'STORYBOOKYOU';
 // How many pages to draw at the same time. One at a time meant ~37s x 15 pages,
 // nearly ten minutes of waiting. Raise carefully: too many at once and OpenAI
 // starts rate limiting, which shows up as failed pages.
@@ -333,6 +344,17 @@ app.post('/checkout', async (req, res) => {
       + '[terms](' + SITE_URL.replace(/\/+$/, '') + '/legal.html#terms)'
       + ' and to immediate delivery.');
 
+    // Layered on rather than appended to `form`, so that there is still a body
+    // without it to fall back to. Stripe refuses the suffix outright on an
+    // account with no descriptor prefix set, and refuses it again if prefix and
+    // suffix together run past 22 characters - neither of which we can see from
+    // here, and neither of which is worth losing a sale over.
+    const withDescriptor = (params) => {
+      const copy = new URLSearchParams(params);
+      copy.append('payment_intent_data[statement_descriptor_suffix]', STATEMENT_DESCRIPTOR_SUFFIX);
+      return copy;
+    };
+
     async function createSession(body) {
       const resp = await fetch('https://api.stripe.com/v1/checkout/sessions', {
         method: 'POST',
@@ -345,13 +367,45 @@ app.post('/checkout', async (req, res) => {
       return { ok: resp.ok, body: await resp.json() };
     }
 
-    let r = await createSession(consent);
-    if (!r.ok) {
-      // Never let the consent box be the reason someone cannot buy. Log it loudly
-      // so it gets fixed, then fall back to a plain session.
-      console.error('Stripe rejected the consent-collecting session, falling back:',
-        (r.body.error && r.body.error.message) || r.body);
-      r = await createSession(form);
+    // Best first, dropping one refusable thing per rung. None of them changes
+    // what the customer is charged or whether the promotion code box appears,
+    // so falling down this ladder costs evidence or recognition, never money.
+    // Consent outranks the descriptor: it is what settles a chargeback, where
+    // the descriptor only makes one less likely.
+    //
+    // The extra calls only happen once a session has already been refused, so
+    // an ordinary sale is still a single request.
+    const attempts = [
+      { what: 'the consent box and the card descriptor', has: ['consent', 'descriptor'], body: withDescriptor(consent) },
+      { what: 'the consent box alone', has: ['consent'], body: consent },
+      { what: 'the card descriptor alone', has: ['descriptor'], body: withDescriptor(form) },
+      { what: 'neither', has: [], body: form }
+    ];
+
+    // Stripe names what it objected to, so a rung still carrying something it
+    // has already refused is skipped rather than sent. Skipped, never stopped:
+    // a refusal we cannot read the reason for walks the whole ladder down to a
+    // plain session, because a wasted request costs nothing next to a customer
+    // who cannot pay.
+    const refused = new Set();
+    let r;
+    let used = '';
+    for (const attempt of attempts) {
+      if (attempt.has.some((feature) => refused.has(feature))) continue;
+      r = await createSession(attempt.body);
+      if (r.ok) { used = attempt.what; break; }
+      const err = (r.body && r.body.error) || {};
+      const blame = `${err.param || ''} ${err.message || ''}`.toLowerCase();
+      if (blame.includes('consent') || blame.includes('terms')) refused.add('consent');
+      if (blame.includes('descriptor')) refused.add('descriptor');
+      // Logged in full. A descriptor quietly dropped from every sale is
+      // invisible until someone disputes a charge they did not recognise.
+      console.error(`Stripe refused a checkout session carrying ${attempt.what}:`,
+        err.message || r.body);
+    }
+    if (r.ok && used !== attempts[0].what) {
+      console.error(`Checkout fell back to ${used}. This is not meant to be the`
+        + ' normal path - fix the cause above rather than leaving it here.');
     }
     const session = r.body;
     if (!r.ok) {
@@ -1356,4 +1410,4 @@ if (require.main === module) {
   setInterval(resumeUnfinished, 60 * 1000);
 }
 
-module.exports = { app, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
+module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
