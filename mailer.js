@@ -17,7 +17,7 @@ const PORT = parseInt(process.env.SMTP_PORT, 10) || 465;
 const USER = process.env.SMTP_USER;
 const PASS = process.env.SMTP_PASS;
 const FROM = process.env.MAIL_FROM || USER;
-const FROM_NAME = process.env.MAIL_FROM_NAME || 'Storybook You';
+const FROM_NAME = process.env.MAIL_FROM_NAME || 'Crayonauts';
 // Implicit TLS by default on 465, STARTTLS elsewhere. SMTP_SECURE overrides,
 // so a non-standard port can still be told which transport to use instead of
 // silently falling back to plaintext.
@@ -158,7 +158,7 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
     'Keep this link - it is how you get back to your book. It works for 30 days,',
     'so download the PDF and save it somewhere safe.',
     '',
-    '- Storybook You'
+    '- Crayonauts'
   ].join('\n');
   const html = [
     '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
