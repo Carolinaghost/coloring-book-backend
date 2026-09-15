@@ -56,7 +56,11 @@ const IMAGES_PER_MIN = parseInt(process.env.OPENAI_IMAGES_PER_MIN, 10) || 45;
 // ceiling: per visitor, and across the whole site.
 const FREE_PREVIEWS_PER_IP = parseInt(process.env.FREE_PREVIEWS_PER_IP, 10) || 8;
 const FREE_PREVIEWS_PER_HOUR = parseInt(process.env.FREE_PREVIEWS_PER_HOUR, 10) || 240;
-const SITE_URL = process.env.SITE_URL || 'https://carolinaghost.github.io/-storybook-you-site';
+// Where customers are sent back to after paying, and where the emailed link to
+// a finished book points. Render sets SITE_URL; this default only matters if it
+// ever goes missing, which is exactly when a stale one does the most damage -
+// every success_url, cancel_url, terms link and book link at once.
+const SITE_URL = process.env.SITE_URL || 'https://crayonauts.com';
 // Scenes the visitor can generate for free before being asked to pay.
 const FREE_PREVIEW_PAGES = parseInt(process.env.FREE_PREVIEW_PAGES, 10) || 2;
 
@@ -236,7 +240,7 @@ app.post('/email-test', async (req, res) => {
   try {
     await mailer.sendMail({
       to,
-      subject: 'Storybook You test email',
+      subject: 'Crayonauts test email',
       text: 'If you are reading this, order emails will work.',
       html: '<p>If you are reading this, order emails will work.</p>'
     });
