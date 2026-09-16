@@ -76,6 +76,19 @@ async function main() {
   // word check - which is exactly what needs proving.
   process.env.MIRROR_CHANCE = '1';
   const { maybeMirror } = require('../server.js');
+  const textGuard = require('../text-guard.js');
+
+  // maybeMirror asks two guards: the pixel check in mirror-guard.js, and the
+  // vision check in text-guard.js, which is a real OpenAI call. Left alone that
+  // makes this file need a network and a billing account to run, and it behaved
+  // differently depending on whether a key happened to be in the environment -
+  // it passed locally and failed in CI, which is the worst of both.
+  //
+  // So the vision half is stubbed here and its answer set per case. That is not
+  // a way of dodging it: text-guard.js answering "there might be words" with no
+  // key is deliberate and correct, because a page that cannot be checked must
+  // never be flipped. This file is about what maybeMirror does with the answer.
+  const realHasText = textGuard.hasText;
 
   async function flipsIn(file, rounds) {
     const before = fs.readFileSync(file).toString('base64');
@@ -86,14 +99,33 @@ async function main() {
     return flipped;
   }
 
-  // Sixty throws with the coin removed. One flip here is a book of backwards
-  // writing in the post.
-  check('a page with writing is never flipped',
-    await flipsIn(path.join(FIXTURES, 'words', 'dogwalk-p15.webp'), 60), 0);
-  // And the feature still works when it is turned on, rather than the guard
-  // quietly refusing everything.
-  check('a page with no words still flips',
-    await flipsIn(path.join(FIXTURES, 'no-words', 'owen-p09.webp'), 10), 10);
+  try {
+    // Vision says the page is clean, so the pixel check is the only thing left
+    // standing between a lettered page and a reversed one. Sixty throws with
+    // the coin removed; one flip here is a book of backwards writing in the post.
+    textGuard.hasText = async () => false;
+    check('a page with writing is never flipped',
+      await flipsIn(path.join(FIXTURES, 'words', 'dogwalk-p15.webp'), 60), 0);
+
+    // And the feature still works when it is turned on, rather than the guards
+    // quietly refusing everything.
+    check('a page with no words still flips',
+      await flipsIn(path.join(FIXTURES, 'no-words', 'owen-p09.webp'), 10), 10);
+
+    // The other way round: a page the pixel check is happy with, that vision
+    // says has lettering on it. Either guard alone has to be enough to stop a
+    // flip, or the second one is decoration.
+    textGuard.hasText = async () => true;
+    check('vision alone can stop a flip',
+      await flipsIn(path.join(FIXTURES, 'no-words', 'owen-p09.webp'), 20), 0);
+
+    // A guard that throws must not read as "no words, go ahead".
+    textGuard.hasText = async () => { throw new Error('vision check unavailable'); };
+    check('a guard that fails stops the flip too',
+      await flipsIn(path.join(FIXTURES, 'no-words', 'owen-p09.webp'), 20), 0);
+  } finally {
+    textGuard.hasText = realHasText;
+  }
 
   check('three letters make a word', WORD_LENGTH, 3);
 
