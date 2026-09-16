@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const mailer = require('./mailer');
 const mirrorGuard = require('./mirror-guard');
+const textGuard = require('./text-guard');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
@@ -867,6 +868,7 @@ async function maybeMirror(b64) {
   const buffer = Buffer.from(b64, 'base64');
   try {
     if (await mirrorGuard.hasWords(buffer)) return b64;
+    if (await textGuard.hasText(buffer)) return b64;
   } catch (err) {
     // Unreadable means unflippable. Leaning the same way is a page nobody
     // notices; backwards writing is a page that gets sent back.
