@@ -209,6 +209,34 @@ async function main() {
   check('but staying high does', memDb2._alerts.has('capacity:memory'), true);
   check('as a warning, not a 2am critical', lastSent[0] && lastSent[0].level, 'WARNING');
 
+  console.log('\nLetting the database sleep');
+
+  // Neon bills time awake, not queries, and suspends after ~5 minutes idle. So
+  // a poll every 60 seconds never lets the timer run out: measured at 0.25 CU
+  // running continuously, ~183 CU-hours a month against an allowance of 191.9.
+  // The fix is to poll rarely when there is no reason to poll at all.
+  const { pollDelayMs } = require('../server.js');
+  const MIN = 60000;
+  const opts = { activeWindowMs: 15 * MIN, sweepMs: MIN, idleMs: 30 * MIN };
+
+  check('nothing happening, so it waits half an hour',
+    pollDelayMs({ ...opts }), 30 * MIN);
+  check('a book being drawn keeps it on the fast cadence',
+    pollDelayMs({ ...opts, rendering: 1 }), MIN);
+  check('so does something having just happened',
+    pollDelayMs({ ...opts, sinceActivityMs: 2 * MIN }), MIN);
+  // An open alert has to be watched until it clears, or the all-clear arrives
+  // half an hour late and the escalation never happens at all.
+  check('and an open alert, until it clears',
+    pollDelayMs({ ...opts, openAlerts: true }), MIN);
+  check('but once it is quiet again it backs off',
+    pollDelayMs({ ...opts, sinceActivityMs: 20 * MIN }), 30 * MIN);
+  // The boundary: exactly at the window is still quiet, a moment inside is not.
+  check('the activity window is exclusive at its edge',
+    pollDelayMs({ ...opts, sinceActivityMs: 15 * MIN }), 30 * MIN);
+  check('and inclusive just inside it',
+    pollDelayMs({ ...opts, sinceActivityMs: 15 * MIN - 1 }), MIN);
+
   console.log('\nThe daily digest');
 
   const digestDb = fakeDb([]);
