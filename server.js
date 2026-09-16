@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const mailer = require('./mailer');
 const mirrorGuard = require('./mirror-guard');
+const { buildBookPdf, pdfFileName } = require('./pdf');
 const textGuard = require('./text-guard');
 
 const app = express();
@@ -40,6 +41,11 @@ const FAMILY_PRICE_CENTS = parseInt(process.env.FAMILY_PRICE_CENTS, 10) || 2500;
 // after Bluevine changes theirs - hence the env override, and hence /checkout
 // falling back to a session without it rather than failing the sale.
 const STATEMENT_DESCRIPTOR_SUFFIX = process.env.STATEMENT_DESCRIPTOR_SUFFIX || 'STORYBOOKYOU';
+// Above this, the finished book is emailed as a link only. Gmail refuses an
+// attachment over 25MB and Outlook over 20, and base64 adds about a third on
+// the wire, so 8MB of PDF (~10.7MB sent) clears both with room to spare. A
+// 15-page book comes out under 1MB, so this is a guard, not a limit.
+const MAX_ATTACHMENT_BYTES = parseInt(process.env.MAX_ATTACHMENT_BYTES, 10) || 8 * 1024 * 1024;
 // How many pages to draw at the same time. One at a time meant ~37s x 15 pages,
 // nearly ten minutes of waiting. Raise carefully: too many at once and OpenAI
 // starts rate limiting, which shows up as failed pages.
@@ -460,6 +466,90 @@ app.get('/orders/:id/access', async (req, res) => {
   } catch (err) {
     console.error('Access check failed:', err);
     res.status(500).json({ error: 'Could not load the order.' });
+  }
+});
+
+// The finished book. Built once when the last page lands and kept, so the copy
+// attached to the email and the copy behind the download link are the same
+// file. Orders that finished before this existed have nothing stored, so the
+// first download builds it and stores it then.
+async function bookPdf(order) {
+  const stored = await db.getBookPdf(order.id);
+  if (stored && stored.length) return Buffer.from(stored);
+
+  const pages = await db.listPages(order.id);
+  if (!pages.length) throw new Error('that order has no pages to build a book from');
+
+  const pdf = await buildBookPdf({
+    childName: order.childName,
+    theme: order.theme,
+    pages
+  });
+  // Storing is a convenience, not the point: a book that cannot be cached is
+  // still a book, so a failure here must not lose the file we just built.
+  try {
+    await db.saveBookPdf(order.id, pdf);
+  } catch (err) {
+    console.error(`Order ${order.id}: built the PDF but could not store it - ${err.message}`);
+  }
+  return pdf;
+}
+
+// The "your book is ready" email, with the book on it when it will fit.
+//
+// pdf may be null - the build can fail, and when it does the customer still
+// gets the email and the link. Delivery is what matters; the attachment is a
+// convenience on top of it.
+async function emailBookReady({ order, pdf, pageCount }) {
+  const msg = mailer.orderReadyEmail({
+    childName: order.childName,
+    orderId: order.id,
+    accessToken: order.accessToken,
+    siteUrl: SITE_URL,
+    pageCount
+  });
+
+  // Attach the book unless it is big enough to bounce. Gmail refuses over 25MB
+  // and Outlook over 20, and base64 adds about a third on the wire, so the cap
+  // sits on the raw file with room to spare. An email that arrives carrying
+  // only a link beats one that never arrives at all.
+  const attachments = [];
+  if (pdf && pdf.length <= MAX_ATTACHMENT_BYTES) {
+    attachments.push({
+      filename: pdfFileName(order.childName),
+      contentType: 'application/pdf',
+      content: pdf
+    });
+  } else if (pdf) {
+    console.error(`Order ${order.id}: PDF is ${(pdf.length / 1048576).toFixed(2)}MB, over the `
+      + `${(MAX_ATTACHMENT_BYTES / 1048576).toFixed(0)}MB cap - emailing the link only.`);
+  }
+
+  await mailer.sendMail({
+    to: order.email, subject: msg.subject, text: msg.text, html: msg.html, attachments
+  });
+  console.log(`Order ${order.id}: ready-email sent${attachments.length ? ' with the book attached' : ' (link only)'}.`);
+  return { attached: attachments.length > 0 };
+}
+
+// The finished book as one file. Same PDF the email carries, so a customer who
+// lost the attachment and a customer who never got one end up with the same
+// thing.
+app.get('/orders/:id/book.pdf', async (req, res) => {
+  try {
+    const order = await db.authorizeOrder(req.params.id, req.query.token);
+    if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
+    if (!order.paid) return res.status(402).json({ error: 'This order has not been paid for.' });
+
+    const pdf = await bookPdf(order);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Length', pdf.length);
+    res.setHeader('Content-Disposition',
+      'attachment; filename="' + pdfFileName(order.childName) + '"');
+    res.send(pdf);
+  } catch (err) {
+    console.error('Could not serve the book PDF:', err);
+    res.status(500).json({ error: 'Could not build the book.' });
   }
 });
 
@@ -1031,18 +1121,20 @@ async function renderBook(orderId) {
       }
     }
 
+    // Build the book once, here, while everything is warm. If this throws, the
+    // order is still finished and the customer is still emailed the link.
+    let pdf = null;
+    try {
+      pdf = await bookPdf(order);
+      console.log(`Order ${orderId}: PDF built, ${(pdf.length / 1048576).toFixed(2)}MB.`);
+    } catch (pdfErr) {
+      console.error(`Order ${orderId}: could not build the PDF - ${pdfErr.message}`);
+    }
+
     // Only now is the book real, so only now do we tell the customer.
     if (order.email && mailer.configured && done > 0) {
       try {
-        const msg = mailer.orderReadyEmail({
-          childName: order.childName,
-          orderId: order.id,
-          accessToken: order.accessToken,
-          siteUrl: SITE_URL,
-          pageCount: done
-        });
-        await mailer.sendMail({ to: order.email, subject: msg.subject, text: msg.text, html: msg.html });
-        console.log(`Order ${orderId}: ready-email sent.`);
+        await emailBookReady({ order, pdf, pageCount: done });
       } catch (mailErr) {
         console.error(`Order ${orderId}: could not email - ${mailErr.message}`);
       }
@@ -1416,4 +1508,4 @@ if (require.main === module) {
   setInterval(resumeUnfinished, 60 * 1000);
 }
 
-module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
+module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };

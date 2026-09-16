@@ -79,41 +79,84 @@ function dotStuff(body) {
   return body.split(/\r?\n/).map(l => (l.startsWith('.') ? '.' + l : l)).join('\r\n');
 }
 
-function buildMessage({ to, subject, text, html }) {
-  const boundary = 'bnd_' + Math.random().toString(36).slice(2);
+// base64 for a mail body must be wrapped: RFC 2045 caps an encoded line at 76
+// characters, and some servers reject or silently mangle anything longer.
+function base64Lines(buffer) {
+  return (buffer.toString('base64').match(/.{1,76}/g) || []).join('\r\n');
+}
+
+function buildMessage({ to, subject, text, html, attachments }) {
+  const alt = 'alt_' + Math.random().toString(36).slice(2);
+
+  // The two readable versions of the same message.
+  const altPart = [
+    '--' + alt,
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    text,
+    '--' + alt,
+    'Content-Type: text/html; charset=UTF-8',
+    '',
+    html,
+    '--' + alt + '--',
+    ''
+  ].join('\r\n');
+
+  const files = attachments || [];
+  if (!files.length) {
+    const headers = [
+      'From: ' + FROM_NAME + ' <' + FROM + '>',
+      'To: ' + to,
+      'Subject: ' + subject,
+      'MIME-Version: 1.0',
+      'Date: ' + new Date().toUTCString(),
+      'Content-Type: multipart/alternative; boundary="' + alt + '"'
+    ].join('\r\n');
+    return headers + '\r\n\r\n' + altPart;
+  }
+
+  // With a file attached the shape has to change: multipart/mixed on the
+  // outside, the alternative pair as its first part, the files after it. Nested
+  // the other way round, most clients show the PDF instead of the message.
+  const mixed = 'mix_' + Math.random().toString(36).slice(2);
   const headers = [
     'From: ' + FROM_NAME + ' <' + FROM + '>',
     'To: ' + to,
     'Subject: ' + subject,
     'MIME-Version: 1.0',
     'Date: ' + new Date().toUTCString(),
-    'Content-Type: multipart/alternative; boundary="' + boundary + '"'
+    'Content-Type: multipart/mixed; boundary="' + mixed + '"'
   ].join('\r\n');
 
-  const body = [
+  const parts = [
     '',
-    '--' + boundary,
-    'Content-Type: text/plain; charset=UTF-8',
+    '--' + mixed,
+    'Content-Type: multipart/alternative; boundary="' + alt + '"',
     '',
-    text,
-    '--' + boundary,
-    'Content-Type: text/html; charset=UTF-8',
-    '',
-    html,
-    '--' + boundary + '--',
-    ''
-  ].join('\r\n');
+    altPart
+  ];
+  for (const f of files) {
+    parts.push(
+      '--' + mixed,
+      'Content-Type: ' + (f.contentType || 'application/octet-stream') + '; name="' + f.filename + '"',
+      'Content-Transfer-Encoding: base64',
+      'Content-Disposition: attachment; filename="' + f.filename + '"',
+      '',
+      base64Lines(f.content)
+    );
+  }
+  parts.push('--' + mixed + '--', '');
 
-  return headers + '\r\n' + body;
+  return headers + '\r\n' + parts.join('\r\n');
 }
 
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, attachments }) {
   if (!configured) throw new Error('SMTP_USER / SMTP_PASS are not set.');
 
   let socket = await connect();
   try {
     await readReply(socket, [220]);
-    await say(socket, 'EHLO storybook', [250]);
+    await say(socket, 'EHLO crayonauts', [250]);
 
     if (!SECURE) {
       await say(socket, 'STARTTLS', [220]);
@@ -121,7 +164,7 @@ async function sendMail({ to, subject, text, html }) {
         const up = tls.connect({ socket, servername: HOST }, () => resolve(up));
         up.once('error', reject);
       });
-      await say(socket, 'EHLO storybook', [250]);
+      await say(socket, 'EHLO crayonauts', [250]);
     }
 
     await say(socket, 'AUTH LOGIN', [334]);
@@ -132,7 +175,7 @@ async function sendMail({ to, subject, text, html }) {
     await say(socket, 'RCPT TO:<' + to + '>', [250, 251]);
     await say(socket, 'DATA', [354]);
 
-    socket.write(dotStuff(buildMessage({ to, subject, text, html })) + '\r\n.\r\n');
+    socket.write(dotStuff(buildMessage({ to, subject, text, html, attachments })) + '\r\n.\r\n');
     await readReply(socket, [250]);
 
     try { await say(socket, 'QUIT', [221]); } catch (e) { /* some servers just hang up */ }
@@ -172,4 +215,4 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
   return { subject, text, html };
 }
 
-module.exports = { sendMail, orderReadyEmail, configured, HOST, PORT, SECURE, USER: USER || null };
+module.exports = { sendMail, orderReadyEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
