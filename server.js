@@ -128,6 +128,8 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
       const session = event.data.object;
       const order = await db.markPaid(session.id, session.amount_total);
       console.log(order ? `Order ${order.id} marked paid.` : `No order for session ${session.id}.`);
+      // Somebody has paid. Whatever the pollers were doing, do it now.
+      wakeUp();
 
       // Counted here rather than in the browser: this is the only place a sale
       // is certain, and it still lands even if the customer closes the tab
@@ -175,6 +177,7 @@ function requireAdmin(req, res) {
 }
 
 app.post('/orders', async (req, res) => {
+  wakeUp();
   const { childName, childCount, email, theme, notes, thumb, pageCount } = req.body || {};
   if (!childName || !email) {
     return res.status(400).json({ error: 'Missing childName or email.' });
@@ -1068,6 +1071,7 @@ async function renderBook(orderId) {
     return;
   }
   rendering.add(String(orderId));
+  wakeUp();
   try {
     const order = await db.getOrderForRender(orderId);
     if (!order) throw new Error('Order not found.');
@@ -1172,6 +1176,7 @@ async function renderBook(orderId) {
   } finally {
     rendering.delete(String(orderId));
     // A slot just opened; drain the queue rather than waiting for the timer.
+    wakeUp();
     setTimeout(resumeUnfinished, 1000);
   }
 }
@@ -1451,8 +1456,21 @@ app.get('/', (req, res) => {
 
 // Simple health check — also reports which storage engine is live, so you can
 // tell at a glance whether DATABASE_URL actually took effect on Render.
+// Plain /health touches nothing: db.status() is in-memory. That matters because
+// a platform health check hitting this every thirty seconds would hold the
+// database awake on its own, which is the very thing being fixed below.
+//
+// The numbers worth having - order count, storage figures - are behind ?full=1,
+// for when someone is actually looking.
 app.get('/health', async (req, res) => {
   const state = db.status();
+  if (!req.query.full) {
+    return res.json({
+      ok: true, storage: state.storage, dbReady: state.ready,
+      email: mailer.configured ? 'configured' : 'not configured',
+      note: 'add ?full=1 for order counts and storage sizes (wakes the database)'
+    });
+  }
   try {
     const count = await db.countOrders();
     // Both storage figures, side by side, because they are not the same number
@@ -1608,7 +1626,10 @@ async function runWatchdogOnce() {
   if (watching) return;
   watching = true;
   try {
-    await watchdog.runWatchdog(watchdogContext());
+    const out = await watchdog.runWatchdog(watchdogContext());
+    // An open alert is a reason to keep looking: we want to notice it clearing
+    // promptly, and to escalate it if it worsens.
+    watchdogHasOpenAlerts = (out.findings || []).length > 0;
   } catch (err) {
     console.error('Watchdog run failed:', err.message);
   } finally {
@@ -1617,8 +1638,8 @@ async function runWatchdogOnce() {
 }
 
 if (process.env.NODE_ENV !== 'test') {
-  setTimeout(runWatchdogOnce, 90 * 1000).unref();
-  setInterval(runWatchdogOnce, WATCHDOG_MINUTES * 60 * 1000).unref();
+  // The watchdog is driven by the heartbeat below, not its own timer: two
+  // timers would wake the database twice as often for no extra safety.
 
   // The daily digest, at 8am UTC-ish - checked hourly so a restart cannot skip
   // the one minute it would have fired in.
@@ -1634,6 +1655,62 @@ if (process.env.NODE_ENV !== 'test') {
       console.error('Watchdog digest failed:', err.message);
     }
   }, 60 * 60 * 1000).unref();
+}
+
+// ---------------------------------------------------------------------------
+// Letting the database go to sleep.
+//
+// Neon bills compute by time awake, not by queries, and suspends after about
+// five minutes with no activity. That makes the SHAPE of our polling the whole
+// cost: a query costs nothing, but every query that arrives on an idle database
+// buys another five minutes of awake time.
+//
+// Measured: 30.5 CU-hours over 5 days is 0.25 CU running continuously - it was
+// never suspending at all. The resume sweep ran every 60 seconds whether or not
+// there was anything to resume, so the five-minute timer never once ran out.
+//
+//   every 60s   the idle timer never expires          ~180 CU-h/month
+//   every 5m    288 wakes x 5 min = awake all day     ~180 CU-h/month
+//   every 30m    48 wakes x 5 min = ~4 h/day          ~30 CU-h/month
+//   every 60m    24 wakes x 5 min = ~2 h/day          ~15 CU-h/month
+//
+// The free plan allows 191.9 CU-hours a month, which is why this mattered.
+//
+// Note the second row: the watchdog polling every five minutes would have kept
+// the database awake by itself. Fixing the sweep alone would have achieved
+// nothing, so both now share one idle schedule and wake it together.
+//
+// So: poll quickly while there is any reason to, and rarely when there is not.
+// "Reason to" is a render in flight, something having happened recently, or an
+// open alert we are waiting to see clear. Anything that could create work marks
+// activity, which drops it straight back to the fast cadence.
+// ---------------------------------------------------------------------------
+
+const ACTIVE_WINDOW_MS = parseInt(process.env.ACTIVE_WINDOW_MINUTES, 10) * 60000 || 15 * 60 * 1000;
+const IDLE_POLL_MS = (parseInt(process.env.IDLE_POLL_MINUTES, 10) || 30) * 60 * 1000;
+const SWEEP_MS = 60 * 1000;
+
+let lastActivityAt = Date.now();
+let watchdogHasOpenAlerts = false;
+
+// Called from anywhere that means work might exist: an order placed, a payment
+// landing, a render starting or finishing. Cheap on purpose - it is only a
+// timestamp, and it is what decides whether the database gets to sleep.
+function noteActivity() { lastActivityAt = Date.now(); }
+
+function busy() {
+  return rendering.size > 0
+    || (Date.now() - lastActivityAt) < ACTIVE_WINDOW_MS
+    || watchdogHasOpenAlerts;
+}
+
+// The decision, pulled out so it can be tested without timers. Every argument
+// is a reason to stay awake; none of them, and the database gets to sleep.
+function pollDelayMs({ rendering = 0, sinceActivityMs = Infinity, openAlerts = false,
+                       activeWindowMs = ACTIVE_WINDOW_MS, sweepMs = SWEEP_MS,
+                       idleMs = IDLE_POLL_MS } = {}) {
+  const awake = rendering > 0 || sinceActivityMs < activeWindowMs || openAlerts;
+  return awake ? sweepMs : idleMs;
 }
 
 // A book is drawn in this process's memory, so a restart - a deploy, a crash,
@@ -1667,16 +1744,52 @@ async function resumeUnfinished() {
     sweeping = false;
   }
 }
+// One timer for both the resume sweep and the watchdog. Separate timers would
+// wake the database twice as often for no extra safety, and it is the number of
+// wakes that costs, not the work done in them.
+let heartbeatTimer = null;
+let lastWatchdogAt = 0;
+
+async function heartbeat() {
+  try {
+    await resumeUnfinished();
+    // While busy the sweep runs every minute, but the watchdog has nothing new
+    // to say that often. When idle they share the one wake.
+    const due = Date.now() - lastWatchdogAt >= WATCHDOG_MINUTES * 60 * 1000;
+    if (due || !busy()) {
+      lastWatchdogAt = Date.now();
+      await runWatchdogOnce();
+    }
+  } catch (err) {
+    console.error('Heartbeat failed:', err.message);
+  } finally {
+    scheduleHeartbeat();
+  }
+}
+
+function scheduleHeartbeat() {
+  if (heartbeatTimer) clearTimeout(heartbeatTimer);
+  const delay = busy() ? SWEEP_MS : IDLE_POLL_MS;
+  heartbeatTimer = setTimeout(heartbeat, delay);
+  heartbeatTimer.unref();
+}
+
+// Something happened, so stop dawdling: come back on the fast cadence rather
+// than waiting out the rest of a half-hour idle sleep.
+function wakeUp() {
+  noteActivity();
+  if (heartbeatTimer) scheduleHeartbeat();
+}
+
 // Only when run as the server. Required as a module - by a test, or by
 // scripts/render-test-book.js - this file hands back the prompt and render
 // helpers without opening a port or starting the resume sweeps.
 if (require.main === module) {
   app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
-  // Once shortly after boot (the restart case), then periodically for anything
-  // that dies while we are up.
-  setTimeout(resumeUnfinished, 20 * 1000);
-  setInterval(resumeUnfinished, 60 * 1000);
+  // Once shortly after boot: a deploy or a crash is exactly when an order gets
+  // abandoned mid-render, and it is the one case polling cannot be lazy about.
+  setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
 module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
-  sendAlert, watchdogRuntime, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
+  sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
