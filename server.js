@@ -10,6 +10,7 @@ const path = require('path');
 const mailer = require('./mailer');
 const mirrorGuard = require('./mirror-guard');
 const { buildBookPdf, pdfFileName } = require('./pdf');
+const watchdog = require('./watchdog');
 const textGuard = require('./text-guard');
 
 const app = express();
@@ -528,6 +529,7 @@ async function emailBookReady({ order, pdf, pageCount }) {
   await mailer.sendMail({
     to: order.email, subject: msg.subject, text: msg.text, html: msg.html, attachments
   });
+  await db.markReadyEmailSent(order.id);
   console.log(`Order ${order.id}: ready-email sent${attachments.length ? ' with the book attached' : ' (link only)'}.`);
   return { attached: attachments.length > 0 };
 }
@@ -1010,6 +1012,10 @@ async function renderScene({ buffer, mimetype, filename, photos, prompt, paid })
   });
   const data = await response.json();
   if (!response.ok) {
+    // Noted before it is thrown. A 429 means books are merely slow; anything
+    // else repeated means they are probably not finishing at all, and the
+    // watchdog tells those two apart.
+    noteOpenAiTrouble(response.status === 429 ? 'rate-limited' : 'failed');
     throw new Error((data.error && data.error.message) || 'Unknown error from OpenAI.');
   }
   const b64 = data.data && data.data[0] && data.data[0].b64_json;
@@ -1027,6 +1033,23 @@ function dataUrlToBuffer(dataUrl) {
 // Orders currently being rendered in this process, so a Stripe webhook retry
 // or a second call can't start the same book twice.
 const rendering = new Set();
+
+// A rolling note of OpenAI trouble. Timestamps only - enough to answer "is it
+// misbehaving right now", which is all the watchdog asks.
+const openAiTrouble = [];
+function noteOpenAiTrouble(kind) {
+  openAiTrouble.push({ kind, at: Date.now() });
+  if (openAiTrouble.length > 400) openAiTrouble.splice(0, openAiTrouble.length - 400);
+}
+function openAiTroubleIn(minutes) {
+  const cutoff = Date.now() - minutes * 60000;
+  const recent = openAiTrouble.filter((t) => t.at >= cutoff);
+  return {
+    windowMinutes: minutes,
+    rateLimited: recent.filter((t) => t.kind === 'rate-limited').length,
+    failed: recent.filter((t) => t.kind === 'failed').length
+  };
+}
 
 // Draws the whole book on the SERVER after payment. The customer's browser
 // plays no part: they can close the tab, switch devices, or never come back,
@@ -1136,6 +1159,9 @@ async function renderBook(orderId) {
       try {
         await emailBookReady({ order, pdf, pageCount: done });
       } catch (mailErr) {
+        // Recorded, not just logged: the watchdog re-sends these, and it can
+        // only do that if a failure leaves a mark.
+        try { await db.markReadyEmailFailed(orderId); } catch (e) {}
         console.error(`Order ${orderId}: could not email - ${mailErr.message}`);
       }
     }
@@ -1466,6 +1492,110 @@ async function purgeOldData() {
 setTimeout(purgeOldData, 60 * 1000).unref();
 setInterval(purgeOldData, 6 * 60 * 60 * 1000).unref();
 
+// ---------------------------------------------------------------------------
+// The watchdog. Jonathan is often driving, so this exists to say something
+// before a customer does.
+// ---------------------------------------------------------------------------
+
+const ALERT_EMAIL = process.env.ALERT_EMAIL || '';
+// The Render plan this runs on: 1 CPU, 2 GB. Overridable because the whole
+// point of the memory warning is to prompt moving to a bigger one.
+const INSTANCE_MEMORY_BYTES = parseInt(process.env.INSTANCE_MEMORY_BYTES, 10) || 2 * 1024 * 1024 * 1024;
+// Unset means the database check quietly does nothing, rather than measuring
+// against a number nobody confirmed. Better silent than wrong.
+const DB_CEILING_BYTES = parseInt(process.env.DB_CEILING_BYTES, 10) || 0;
+const WATCHDOG_MINUTES = parseInt(process.env.WATCHDOG_MINUTES, 10) || 5;
+
+function watchdogRuntime() {
+  return {
+    memoryBytes: process.memoryUsage().rss,
+    memoryLimitBytes: INSTANCE_MEMORY_BYTES,
+    renderingNow: rendering.size,
+    maxConcurrent: MAX_CONCURRENT_BOOKS,
+    openAiErrors: openAiTroubleIn(WATCHDOG_MINUTES * 3),
+    previewsThisHour: sitePreviewWindow.count,
+    previewLimitPerHour: FREE_PREVIEWS_PER_HOUR
+  };
+}
+
+// Subject lines carry the state, so the phone screen alone is the message.
+async function sendAlert({ level, subject, lines }) {
+  const tag = level === 'CLEAR' ? 'RESOLVED' : level;
+  const full = `[${tag}] ${subject}`;
+  console.log(`Watchdog alert: ${full}`);
+  if (!ALERT_EMAIL || !mailer.configured) return false;
+  const text = lines.join('\n\n') + '\n\n-- \nCrayonauts watchdog';
+  await mailer.sendMail({
+    to: ALERT_EMAIL,
+    subject: full,
+    text,
+    html: '<pre style="font:14px/1.5 -apple-system,Helvetica,Arial,sans-serif;white-space:pre-wrap">'
+      + text.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])) + '</pre>'
+  });
+  return true;
+}
+
+// The only two things it is allowed to do on its own.
+async function rekickOrder(orderId) {
+  if (rendering.has(String(orderId))) throw new Error('already rendering');
+  await renderBook(orderId);
+}
+
+async function resendReadyEmail(orderId) {
+  const order = await db.getOrderForRender(orderId);
+  if (!order) throw new Error('order not found');
+  if (!order.email) throw new Error('no email address on the order');
+  const done = await db.countPages(orderId);
+  if (done <= 0) throw new Error('no pages to send');
+  let pdf = null;
+  try { pdf = await bookPdf(order); } catch (e) { /* link-only is still an email */ }
+  await emailBookReady({ order, pdf, pageCount: done });
+}
+
+function watchdogContext() {
+  return {
+    db,
+    runtime: watchdogRuntime(),
+    dbCeilingBytes: DB_CEILING_BYTES,
+    send: sendAlert,
+    rekickOrder,
+    resendReadyEmail
+  };
+}
+
+let watching = false;
+async function runWatchdogOnce() {
+  if (watching) return;
+  watching = true;
+  try {
+    await watchdog.runWatchdog(watchdogContext());
+  } catch (err) {
+    console.error('Watchdog run failed:', err.message);
+  } finally {
+    watching = false;
+  }
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  setTimeout(runWatchdogOnce, 90 * 1000).unref();
+  setInterval(runWatchdogOnce, WATCHDOG_MINUTES * 60 * 1000).unref();
+
+  // The daily digest, at 8am UTC-ish - checked hourly so a restart cannot skip
+  // the one minute it would have fired in.
+  let lastDigestDay = null;
+  setInterval(async () => {
+    const now = new Date();
+    const day = now.toISOString().slice(0, 10);
+    if (now.getUTCHours() !== 8 || lastDigestDay === day) return;
+    lastDigestDay = day;
+    try {
+      await watchdog.dailyDigest(watchdogContext());
+    } catch (err) {
+      console.error('Watchdog digest failed:', err.message);
+    }
+  }, 60 * 60 * 1000).unref();
+}
+
 // A book is drawn in this process's memory, so a restart - a deploy, a crash,
 // Render moving the instance - used to abandon whatever was mid-render, and
 // nothing ever picked it up again. The customer had paid. This sweep finds
@@ -1508,4 +1638,5 @@ if (require.main === module) {
   setInterval(resumeUnfinished, 60 * 1000);
 }
 
-module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
+module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+  sendAlert, watchdogRuntime, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };

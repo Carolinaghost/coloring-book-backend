@@ -68,6 +68,28 @@ const CREATE_TABLE_SQL = `
 // Generated artwork, one row per scene. Kept so a customer can re-download
 // their book without us paying OpenAI to redraw it.
 const CREATE_PAGES_SQL = `
+  -- What the watchdog has already told Jonathan about. One row per condition,
+  -- so a problem that lasts all afternoon is one email and not eighty.
+  CREATE TABLE IF NOT EXISTS watchdog_alerts (
+    key           TEXT        PRIMARY KEY,
+    level         TEXT        NOT NULL,
+    detail        TEXT        NOT NULL DEFAULT '',
+    first_seen    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    told_level    TEXT,
+    told_at       TIMESTAMPTZ
+  );
+
+  -- Every automatic fix, so there is always an answer to "what did it do at 3am".
+  CREATE TABLE IF NOT EXISTS watchdog_actions (
+    id         SERIAL      PRIMARY KEY,
+    order_id   INTEGER,
+    action     TEXT        NOT NULL,
+    reason     TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS watchdog_actions_at_idx ON watchdog_actions (created_at DESC);
+
   CREATE TABLE IF NOT EXISTS order_pdfs (
     order_id   INTEGER     PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
     pdf        BYTEA       NOT NULL,
@@ -122,7 +144,12 @@ const MIGRATIONS = [
   // A family book: one entry per person, each with their own photo, in the
   // order the pages should introduce them. Null for a single-subject book,
   // which still uses child_count, subject_type and the one photo column.
-  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS people TEXT"
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS people TEXT",
+  // Whether the "your book is ready" email actually went. Without these the
+  // watchdog cannot tell a customer who was told from one who was not, which is
+  // the difference between a finished order and a silent failure.
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ready_email_at TIMESTAMPTZ",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ready_email_fails INTEGER NOT NULL DEFAULT 0"
 ];
 
 const CREATE_INDEX_SQL = `
@@ -379,6 +406,162 @@ async function getBookPdf(orderId) {
   return (rows[0] && rows[0].pdf) || null;
 }
 
+// ---------------------------------------------------------------------------
+// Watchdog storage. Kept here so the checks can be tested against a real shape
+// without a server running.
+// ---------------------------------------------------------------------------
+
+let memoryAlerts = new Map();
+let memoryActions = [];
+
+async function getAlerts() {
+  if (!usingPostgres) return [...memoryAlerts.values()].map((a) => ({ ...a }));
+  const { rows } = await pool.query('SELECT * FROM watchdog_alerts');
+  return rows.map((r) => ({
+    key: r.key, level: r.level, detail: r.detail,
+    firstSeen: r.first_seen, lastSeen: r.last_seen,
+    toldLevel: r.told_level, toldAt: r.told_at
+  }));
+}
+
+async function saveAlert(a) {
+  if (!usingPostgres) { memoryAlerts.set(a.key, { ...a }); return; }
+  await pool.query(
+    `INSERT INTO watchdog_alerts (key, level, detail, first_seen, last_seen, told_level, told_at)
+     VALUES ($1, $2, $3, COALESCE($4, NOW()), NOW(), $5, $6)
+     ON CONFLICT (key) DO UPDATE SET
+       level = EXCLUDED.level, detail = EXCLUDED.detail, last_seen = NOW(),
+       told_level = EXCLUDED.told_level, told_at = EXCLUDED.told_at`,
+    [a.key, a.level, a.detail || '', a.firstSeen || null, a.toldLevel || null, a.toldAt || null]
+  );
+}
+
+async function clearAlert(key) {
+  if (!usingPostgres) { memoryAlerts.delete(key); return; }
+  await pool.query('DELETE FROM watchdog_alerts WHERE key = $1', [key]);
+}
+
+async function recordAction(orderId, action, reason) {
+  const row = { orderId: orderId === null ? null : Number(orderId), action, reason: reason || '', createdAt: new Date() };
+  if (!usingPostgres) { memoryActions.push(row); return row; }
+  await pool.query(
+    'INSERT INTO watchdog_actions (order_id, action, reason) VALUES ($1, $2, $3)',
+    [row.orderId, action, row.reason]
+  );
+  return row;
+}
+
+// How many automatic fixes have fired in the last `minutes`. This is what stops
+// a retry loop against a paid image API, so it counts everything, not per-order.
+async function countActionsSince(minutes) {
+  if (!usingPostgres) {
+    const cutoff = Date.now() - minutes * 60000;
+    return memoryActions.filter((a) => a.createdAt.getTime() >= cutoff).length;
+  }
+  const { rows } = await pool.query(
+    "SELECT COUNT(*)::int AS n FROM watchdog_actions WHERE created_at > NOW() - ($1 * INTERVAL '1 minute')",
+    [minutes]
+  );
+  return rows[0].n;
+}
+
+async function countActionsForOrder(orderId, action) {
+  if (!usingPostgres) {
+    return memoryActions.filter((a) => a.orderId === Number(orderId) && a.action === action).length;
+  }
+  const { rows } = await pool.query(
+    'SELECT COUNT(*)::int AS n FROM watchdog_actions WHERE order_id = $1 AND action = $2',
+    [Number(orderId), action]
+  );
+  return rows[0].n;
+}
+
+async function recentActions(minutes) {
+  if (!usingPostgres) {
+    const cutoff = Date.now() - minutes * 60000;
+    return memoryActions.filter((a) => a.createdAt.getTime() >= cutoff).map((a) => ({ ...a }));
+  }
+  const { rows } = await pool.query(
+    "SELECT order_id, action, reason, created_at FROM watchdog_actions "
+    + "WHERE created_at > NOW() - ($1 * INTERVAL '1 minute') ORDER BY created_at",
+    [minutes]
+  );
+  return rows.map((r) => ({ orderId: r.order_id, action: r.action, reason: r.reason, createdAt: r.created_at }));
+}
+
+// Bytes the database is using. The number the plan's ceiling is measured against.
+async function databaseSizeBytes() {
+  if (!usingPostgres) return null;
+  const { rows } = await pool.query('SELECT pg_database_size(current_database())::bigint AS n');
+  return Number(rows[0].n);
+}
+
+// Paid orders the watchdog needs to look at: anything not finished, plus
+// anything finished that nobody was told about.
+async function ordersNeedingAttention(minutesOld) {
+  if (!usingPostgres) {
+    return memoryOrders
+      .filter((o) => o.paid)
+      .map((o) => ({
+        id: o.id, paidAt: o.paidAt, pageCount: o.pageCount,
+        generationStatus: o.generationStatus || 'idle',
+        pagesReady: 0, renderAttempts: o.renderAttempts || 0,
+        readyEmailAt: o.readyEmailAt || null, readyEmailFails: o.readyEmailFails || 0,
+        email: o.email, hasPhoto: Boolean(o.photo) || Boolean((o.people || []).length)
+      }));
+  }
+  const { rows } = await pool.query(
+    `SELECT o.id, o.paid_at, o.page_count, o.generation_status, o.render_attempts,
+            o.ready_email_at, o.ready_email_fails, o.email,
+            (o.photo IS NOT NULL OR o.people IS NOT NULL) AS has_photo,
+            (SELECT COUNT(*)::int FROM order_pages p WHERE p.order_id = o.id) AS pages_ready
+       FROM orders o
+      WHERE o.paid = TRUE
+        AND o.paid_at > NOW() - INTERVAL '2 days'
+        AND o.paid_at < NOW() - ($1 * INTERVAL '1 minute')`,
+    [minutesOld]
+  );
+  return rows.map((r) => ({
+    id: r.id, paidAt: r.paid_at, pageCount: r.page_count,
+    generationStatus: r.generation_status, pagesReady: r.pages_ready,
+    renderAttempts: r.render_attempts, readyEmailAt: r.ready_email_at,
+    readyEmailFails: r.ready_email_fails, email: r.email, hasPhoto: r.has_photo
+  }));
+}
+
+async function markReadyEmailSent(orderId) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(orderId));
+    if (o) o.readyEmailAt = new Date();
+    return;
+  }
+  await pool.query('UPDATE orders SET ready_email_at = NOW() WHERE id = $1', [Number(orderId)]);
+}
+
+async function markReadyEmailFailed(orderId) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(orderId));
+    if (o) o.readyEmailFails = (o.readyEmailFails || 0) + 1;
+    return;
+  }
+  await pool.query(
+    'UPDATE orders SET ready_email_fails = ready_email_fails + 1 WHERE id = $1', [Number(orderId)]);
+}
+
+// Yesterday's trade, for the daily digest.
+async function dayTotals(days) {
+  if (!usingPostgres) return { orders: 0, revenueCents: 0, pages: 0 };
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS orders,
+            COALESCE(SUM(amount_cents), 0)::int AS revenue_cents,
+            COALESCE(SUM((SELECT COUNT(*) FROM order_pages p WHERE p.order_id = o.id)), 0)::int AS pages
+       FROM orders o
+      WHERE o.paid = TRUE AND o.paid_at > NOW() - ($1 * INTERVAL '1 day')`,
+    [days]
+  );
+  return { orders: rows[0].orders, revenueCents: rows[0].revenue_cents, pages: rows[0].pages };
+}
+
 async function listPages(orderId) {
   if (!usingPostgres) return [];
   const { rows } = await pool.query(
@@ -514,7 +697,8 @@ async function purgeOldOrders(days) {
     let n = 0;
     memoryOrders.forEach((o) => {
       if (new Date(o.submittedAt).getTime() >= cutoff) return;
-      if (!o.photo && !o.thumb && !o.childName && !o.email && !o.accessToken) return;
+      if (!o.photo && !o.thumb && !o.childName && !o.email && !o.accessToken && !o.pdf) return;
+      o.pdf = null;
       o.photo = null;
       o.thumb = null;
       o.childName = '';
@@ -533,6 +717,14 @@ async function purgeOldOrders(days) {
     await client.query('BEGIN');
     await client.query(
       'DELETE FROM order_pages WHERE order_id IN ('
+      + '  SELECT id FROM orders WHERE submitted_at < NOW() - ($1 * INTERVAL \'1 day\')'
+      + ')',
+      [cutoffDays]);
+    // The finished book too. It IS the drawings - leaving it behind would keep
+    // a copy of the child after the pages it was built from are gone, which is
+    // not what the privacy policy promises, and it would grow forever.
+    await client.query(
+      'DELETE FROM order_pdfs WHERE order_id IN ('
       + '  SELECT id FROM orders WHERE submitted_at < NOW() - ($1 * INTERVAL \'1 day\')'
       + ')',
       [cutoffDays]);
@@ -760,6 +952,18 @@ module.exports = {
   listPages,
   saveBookPdf,
   getBookPdf,
+  getAlerts,
+  saveAlert,
+  clearAlert,
+  recordAction,
+  countActionsSince,
+  countActionsForOrder,
+  recentActions,
+  databaseSizeBytes,
+  ordersNeedingAttention,
+  markReadyEmailSent,
+  markReadyEmailFailed,
+  dayTotals,
   deleteOrder,
   listOrders,
   getOrder,
