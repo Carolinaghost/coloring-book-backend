@@ -529,6 +529,21 @@ async function ordersNeedingAttention(minutesOld) {
   }));
 }
 
+// The moment we started recording whether a ready-email went out. Orders paid
+// before this have ready_email_at NULL because the column did not exist yet,
+// not because nobody was told - and "assume nobody was told" means emailing
+// customers their book a second time. Null here means we have no recorded email
+// at all, so nothing can be judged.
+async function emailRecordingSince() {
+  if (!usingPostgres) {
+    const stamps = memoryOrders.map((o) => o.readyEmailAt).filter(Boolean);
+    return stamps.length ? new Date(Math.min(...stamps.map((d) => new Date(d).getTime()))) : null;
+  }
+  const { rows } = await pool.query(
+    'SELECT MIN(ready_email_at) AS since FROM orders WHERE ready_email_at IS NOT NULL');
+  return rows[0].since || null;
+}
+
 async function markReadyEmailSent(orderId) {
   if (!usingPostgres) {
     const o = memoryOrders.find((x) => x.id === Number(orderId));
@@ -963,6 +978,7 @@ module.exports = {
   ordersNeedingAttention,
   markReadyEmailSent,
   markReadyEmailFailed,
+  emailRecordingSince,
   dayTotals,
   deleteOrder,
   listOrders,

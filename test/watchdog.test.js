@@ -42,6 +42,7 @@ function fakeDb(orders) {
   return {
     _actions: actions,
     _alerts: alerts,
+    async emailRecordingSince() { return this._recordingSince === undefined ? new Date(0) : this._recordingSince; },
     async ordersNeedingAttention(minutes) {
       return orders.filter((o) => Date.now() - new Date(o.paidAt).getTime() >= minutes * 60000);
     },
@@ -103,6 +104,64 @@ async function main() {
   const told = { ...untold, id: 44, readyEmailAt: minsAgo(25) };
   found = await watchdog.gather(ctxFor(fakeDb([told])));
   check('and a finished order that was told about is not', found, []);
+
+  console.log('\nOrders from before we recorded emails are left alone');
+
+  // The column was added by a migration, so every order that finished before it
+  // existed has a null timestamp - not because nobody was told, but because
+  // nothing was recorded. Treating null as "not told" means CRITICAL alerts for
+  // orders that were fine, and worse, RE-EMAILING customers their book.
+  const cutover = new Date(Date.now() - 60 * 60000);
+  const oldOrder = { id: 50, paidAt: new Date(Date.now() - 120 * 60000), pageCount: 15,
+    generationStatus: 'done', pagesReady: 15, renderAttempts: 0, readyEmailAt: null,
+    readyEmailFails: 0, email: 'a@b.test', hasPhoto: true };
+  const newOrder = { ...oldOrder, id: 51, paidAt: new Date(Date.now() - 30 * 60000) };
+
+  const oldDb = fakeDb([oldOrder]);
+  oldDb._recordingSince = cutover;
+  check('an order from before the change is not judged',
+    await watchdog.gather(ctxFor(oldDb)), []);
+
+  const newDb = fakeDb([newOrder]);
+  newDb._recordingSince = cutover;
+  check('one from after it still is',
+    (await watchdog.gather(ctxFor(newDb))).map((f) => f.key), ['order:51:not-told']);
+
+  // Nothing recorded at all means nothing can be judged either way.
+  const freshDb = fakeDb([newOrder]);
+  freshDb._recordingSince = null;
+  check('and with nothing recorded yet, nothing is judged',
+    await watchdog.gather(ctxFor(freshDb)), []);
+
+  // But a genuinely failed email is caught by its own counter, recorded or not.
+  const failedDb = fakeDb([{ ...newOrder, id: 52, readyEmailFails: 2 }]);
+  failedDb._recordingSince = null;
+  check('a failure still shows through the counter',
+    (await watchdog.gather(ctxFor(failedDb))).map((f) => f.key), ['order:52:email-failed']);
+
+  console.log('\nOne problem raises one alert, not two');
+
+  // Done AND the email failed used to match both rules, so one customer
+  // produced two emails about the same thing.
+  const bothDb = fakeDb([{ ...newOrder, id: 53, readyEmailFails: 1 }]);
+  bothDb._recordingSince = cutover;
+  const both = await watchdog.gather(ctxFor(bothDb));
+  check('a finished order with a failed email raises one', both.length, 1);
+  check('and it is the one that says why', both[0].key, 'order:53:email-failed');
+
+  console.log('\nA queued order is not a stuck one');
+
+  // Every slot busy means the book is third in line, not broken. Without this
+  // a burst of orders produces a CRITICAL each, all of them wrong.
+  const queued = { ...oldOrder, id: 54, generationStatus: 'idle', pagesReady: 0,
+    paidAt: new Date(Date.now() - 20 * 60000) };
+  const qDb = fakeDb([queued]);
+  qDb._recordingSince = cutover;
+  check('waiting for a free slot is not an alert',
+    await watchdog.gather(ctxFor(qDb, { runtime: { renderingNow: 7, maxConcurrent: 7 } })), []);
+  check('but the same order with slots free is',
+    (await watchdog.gather(ctxFor(qDb, { runtime: { renderingNow: 2, maxConcurrent: 7 } })))
+      .map((f) => f.key), ['order:54:never-started']);
 
   console.log('\nThe same problem does not email every five minutes');
 
