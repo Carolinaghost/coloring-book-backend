@@ -68,7 +68,7 @@ function ctxFor(db, extra) {
   const out = collector();
   return Object.assign({
     db, send: out.send, _sent: out.sent,
-    runtime: null, dbCeilingBytes: 0,
+    runtime: null, storage: null,
     rekickOrder: async () => {},
     resendReadyEmail: async () => {}
   }, extra || {});
@@ -132,13 +132,57 @@ async function main() {
 
   const warnThenCrit = fakeDb([]);
   warnThenCrit._dbBytes = 0.75 * 1e9;
-  const c1 = ctxFor(warnThenCrit, { dbCeilingBytes: 1e9 });
+  const pgSrc = (db) => ({ source: 'postgres', ceilingBytes: 1e9, neonBytes: async () => null });
+  const c1 = ctxFor(warnThenCrit, { storage: pgSrc() });
   await watchdog.runWatchdog(c1);
   check('70% sends a warning', c1._sent.map((m) => m.level), ['WARNING']);
   warnThenCrit._dbBytes = 0.9 * 1e9;
-  const c2 = ctxFor(warnThenCrit, { dbCeilingBytes: 1e9 });
+  const c2 = ctxFor(warnThenCrit, { storage: pgSrc() });
   await watchdog.runWatchdog(c2);
   check('and 85% escalates rather than staying quiet', c2._sent.map((m) => m.level), ['CRITICAL']);
+
+  console.log('\nStorage: the two figures are never crossed');
+
+  // Neon's console said 365 MB against a 0.5 GB limit while pg_database_size
+  // on the same project reads far lower - it omits WAL, history and other
+  // branches. Comparing the small number to the Neon limit is the mistake this
+  // guards: it reads as plenty of room when there is not.
+  const NEON_LIMIT = 536870912;          // 0.5 GB
+  const neonSays = 365 * 1048576;        // what the console reports: 73%
+  const pgSays = 120 * 1048576;          // the same project, physical, one db
+
+  const sDb = fakeDb([]);
+  sDb._dbBytes = pgSays;
+  const viaNeon = ctxFor(sDb, {
+    storage: { source: 'neon', ceilingBytes: NEON_LIMIT, neonBytes: async () => neonSays }
+  });
+  let f = await watchdog.gather(viaNeon);
+  check('the authoritative figure warns at 73%', f.map((x) => x.level), ['WARNING']);
+  check('and names where it came from', /Neon's own storage figure/.test(f[0].detail), true);
+
+  // The same project read the other way says 23% - no warning at all. That is
+  // the silence this design exists to prevent, so the fallback carries a health
+  // warning about itself in the text.
+  const viaPg = ctxFor(sDb, {
+    storage: { source: 'postgres', ceilingBytes: NEON_LIMIT, neonBytes: async () => null }
+  });
+  check('the Postgres figure against a Neon limit says nothing at all',
+    await watchdog.gather(viaPg), []);
+
+  const pgHigh = fakeDb([]);
+  pgHigh._dbBytes = 0.8 * 1e9;
+  const pgCal = ctxFor(pgHigh, {
+    storage: { source: 'postgres', ceilingBytes: 1e9, neonBytes: async () => null }
+  });
+  f = await watchdog.gather(pgCal);
+  check('a calibrated Postgres ceiling still works', f.map((x) => x.level), ['WARNING']);
+  check('and says plainly that it is not the number Neon caps on',
+    /NOT the number Neon caps on/.test(f[0].detail), true);
+
+  const noCeiling = ctxFor(sDb, {
+    storage: { source: 'neon', ceilingBytes: 0, neonBytes: async () => neonSays }
+  });
+  check('no ceiling set, no guessing', await watchdog.gather(noCeiling), []);
 
   console.log('\nIt gives up on an order rather than retrying forever');
 
@@ -178,7 +222,7 @@ async function main() {
 
   const brokenDb = fakeDb([stuck]);
   brokenDb.databaseSizeBytes = async () => { throw new Error('connection reset'); };
-  const brokenCtx = ctxFor(brokenDb, { dbCeilingBytes: 1e9 });
+  const brokenCtx = ctxFor(brokenDb, { storage: pgSrc() });
   const out = await watchdog.gather(brokenCtx);
   check('the order check still reported',
     out.some((f) => f.key === 'order:41:never-started'), true);
@@ -208,6 +252,35 @@ async function main() {
   }
   check('but staying high does', memDb2._alerts.has('capacity:memory'), true);
   check('as a warning, not a 2am critical', lastSent[0] && lastSent[0].level, 'WARNING');
+
+  console.log('\nReading the number out of Neon');
+
+  const neon = require('../neon.js');
+  const realFetch = global.fetch;
+  try {
+    global.fetch = async () => ({ ok: true, json: async () => ({
+      project: { id: 'p1', synthetic_storage_size: 382730240 } }) });
+    check('it reads synthetic_storage_size, not anything else',
+      await neon.storageBytes({ apiKey: 'k', projectId: 'p1' }), 382730240);
+
+    // A missing field must raise, not quietly answer zero - zero would read as
+    // an empty database and silence the warning forever.
+    global.fetch = async () => ({ ok: true, json: async () => ({ project: {} }) });
+    let threw = null;
+    try { await neon.storageBytes({ apiKey: 'k', projectId: 'p1' }); } catch (e) { threw = e.message; }
+    check('a missing figure raises rather than reading as empty',
+      /no synthetic_storage_size/.test(threw || ''), true);
+
+    global.fetch = async () => ({ ok: false, status: 401, json: async () => ({}) });
+    threw = null;
+    try { await neon.storageBytes({ apiKey: 'bad', projectId: 'p1' }); } catch (e) { threw = e.message; }
+    check('a refused key raises with the status', /401/.test(threw || ''), true);
+
+    // Unconfigured is not an error - it is the signal to use the other source.
+    check('no key, no call', await neon.storageBytes({ apiKey: '', projectId: '' }), null);
+  } finally {
+    global.fetch = realFetch;
+  }
 
   console.log('\nThe daily digest');
 
