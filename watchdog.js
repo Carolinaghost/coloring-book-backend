@@ -92,17 +92,38 @@ async function checkOrders({ db }) {
   return found;
 }
 
-async function checkDatabase({ db, dbCeilingBytes }) {
-  const bytes = await db.databaseSizeBytes();
-  if (bytes === null || !dbCeilingBytes) return [];
-  const used = bytes / dbCeilingBytes;
+// Two different numbers get called "database size", and they are not
+// comparable. Neon's plan limit applies to its synthetic size - logical data
+// across every branch, plus retained WAL. pg_database_size() is the physical
+// size of one database and omits all of that, so measuring it and comparing it
+// to a Neon limit under-reports: the warning would arrive late, which is the
+// one thing a capacity warning must not do.
+//
+// So the source is explicit, each source has its OWN ceiling variable, and the
+// alert says which number it read. Crossing them is not possible by accident.
+async function checkDatabase({ db, storage }) {
+  if (!storage) return [];
+  const { source, ceilingBytes } = storage;
+  if (!ceilingBytes) return [];
+
+  const bytes = source === 'neon'
+    ? await storage.neonBytes()
+    : await db.databaseSizeBytes();
+  if (bytes === null || bytes === undefined) return [];
+
+  const used = bytes / ceilingBytes;
   if (used < DB_WARN_AT) return [];
   const level = used >= DB_CRITICAL_AT ? 'CRITICAL' : 'WARNING';
+  const named = source === 'neon'
+    ? "Neon's own storage figure, which is what the plan limit applies to"
+    : 'pg_database_size, which is NOT the number Neon caps on - it omits WAL, '
+      + 'history and other branches, so the real usage is higher than this';
   return [{
     key: 'capacity:database', level,
-    subject: `Database ${pct(used)} full (${gb(bytes)} of ${gb(dbCeilingBytes)})`,
-    detail: `At ${pct(used)} of the plan's ceiling. Pages are purged after the `
-      + `retention window, so this reflects recent trade, not all orders ever.`
+    subject: `Storage ${pct(used)} full (${gb(bytes)} of ${gb(ceilingBytes)})`,
+    detail: `Read from ${named}.\n\n`
+      + `Pages are purged after the retention window, so this reflects recent `
+      + `trade rather than every order ever taken.`
   }];
 }
 

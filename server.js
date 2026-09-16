@@ -11,6 +11,7 @@ const mailer = require('./mailer');
 const mirrorGuard = require('./mirror-guard');
 const { buildBookPdf, pdfFileName } = require('./pdf');
 const watchdog = require('./watchdog');
+const neon = require('./neon');
 const textGuard = require('./text-guard');
 
 const app = express();
@@ -1472,7 +1473,21 @@ app.get('/health', async (req, res) => {
   }
   try {
     const count = await db.countOrders();
-    res.json({ ok: true, storage: state.storage, dbReady: state.ready, orders: count, email: mailer.configured ? 'configured' : 'not configured' });
+    // Both storage figures, side by side, because they are not the same number
+    // and the difference is exactly what makes a ceiling easy to set wrongly.
+    // Read the one the watchdog is using and set its ceiling from that.
+    const src = storageSource();
+    const sizes = { source: src.source, ceilingBytes: src.ceilingBytes || null };
+    try { sizes.pgDatabaseBytes = await db.databaseSizeBytes(); } catch (e) { sizes.pgDatabaseBytes = null; }
+    if (neon.configured()) {
+      try { sizes.neonSyntheticBytes = await neon.storageBytes(); }
+      catch (e) { sizes.neonSyntheticBytes = null; sizes.neonError = e.message; }
+    }
+    if (sizes.ceilingBytes) {
+      const used = src.source === 'neon' ? sizes.neonSyntheticBytes : sizes.pgDatabaseBytes;
+      if (used) sizes.percentOfCeiling = Math.round((used / sizes.ceilingBytes) * 100);
+    }
+    res.json({ ok: true, storage: state.storage, dbReady: state.ready, orders: count, email: mailer.configured ? 'configured' : 'not configured', sizes });
   } catch (err) {
     res.status(500).json({ ok: false, storage: state.storage, dbReady: state.ready, error: err.message });
   }
@@ -1519,9 +1534,34 @@ const ALERT_EMAIL = process.env.ALERT_EMAIL || '';
 // The Render plan this runs on: 1 CPU, 2 GB. Overridable because the whole
 // point of the memory warning is to prompt moving to a bigger one.
 const INSTANCE_MEMORY_BYTES = parseInt(process.env.INSTANCE_MEMORY_BYTES, 10) || 2 * 1024 * 1024 * 1024;
-// Unset means the database check quietly does nothing, rather than measuring
-// against a number nobody confirmed. Better silent than wrong.
-const DB_CEILING_BYTES = parseInt(process.env.DB_CEILING_BYTES, 10) || 0;
+// Storage has two possible sources and they measure different things, so each
+// gets its own ceiling. Setting the wrong pair is the mistake worth designing
+// out: a Neon plan limit compared against pg_database_size reads far lower than
+// reality, and the warning never arrives.
+//
+//   NEON_STORAGE_LIMIT_BYTES  goes with Neon's synthetic size. This is the one
+//                             the plan caps, so it is the one to prefer.
+//   PG_CEILING_BYTES          goes with pg_database_size. Only meaningful if
+//                             calibrated against that same number - read it off
+//                             /health rather than guessing.
+//
+// Neither set means the check does nothing, which is better than measuring
+// against a number nobody confirmed.
+const NEON_STORAGE_LIMIT_BYTES = parseInt(process.env.NEON_STORAGE_LIMIT_BYTES, 10) || 0;
+const PG_CEILING_BYTES = parseInt(process.env.PG_CEILING_BYTES, 10) || 0;
+
+function storageSource() {
+  if (neon.configured() && NEON_STORAGE_LIMIT_BYTES) {
+    return { source: 'neon', ceilingBytes: NEON_STORAGE_LIMIT_BYTES, neonBytes: () => neon.storageBytes() };
+  }
+  return { source: 'postgres', ceilingBytes: PG_CEILING_BYTES, neonBytes: async () => null };
+}
+
+if (process.env.DB_CEILING_BYTES) {
+  console.warn('DB_CEILING_BYTES is no longer read: it was ambiguous about which '
+    + 'number it capped. Use NEON_STORAGE_LIMIT_BYTES (with NEON_API_KEY and '
+    + 'NEON_PROJECT_ID) or PG_CEILING_BYTES. See /health for both figures.');
+}
 const WATCHDOG_MINUTES = parseInt(process.env.WATCHDOG_MINUTES, 10) || 5;
 
 function watchdogRuntime() {
@@ -1574,7 +1614,7 @@ function watchdogContext() {
   return {
     db,
     runtime: watchdogRuntime(),
-    dbCeilingBytes: DB_CEILING_BYTES,
+    storage: storageSource(),
     send: sendAlert,
     rekickOrder,
     resendReadyEmail
