@@ -86,6 +86,37 @@ function toWinAnsi(str) {
   return out;
 }
 
+// Biggest size from the list that still fits the width. A long name at a fixed
+// size runs off the edge of the page, and Maximilliana-Rose deserves a cover too.
+function fitSize(str, maxWidth, sizes, bold) {
+  for (const size of sizes) if (textWidth(str, size, bold) <= maxWidth) return size;
+  return sizes[sizes.length - 1];
+}
+
+// A five-pointed star as a filled path. Cheap in a PDF - a few numbers, no
+// pixels - and it stays crisp at any print size.
+function star(cx, cy, r) {
+  let d = '';
+  for (let i = 0; i < 10; i++) {
+    const a = (Math.PI / 5) * i - Math.PI / 2;
+    const rad = i % 2 ? r * 0.42 : r;
+    const x = cx + Math.cos(a) * rad;
+    const y = cy + Math.sin(a) * rad;
+    d += `${x.toFixed(1)} ${y.toFixed(1)} ${i ? 'l' : 'm'}\n`;
+  }
+  return d + 'h f\n';
+}
+
+// A rounded rectangle as four lines and four corner curves, stroked.
+function roundedRect(x, y, w, h, r) {
+  const k = r * 0.5523;
+  return `${x + r} ${y} m\n`
+    + `${x + w - r} ${y} l\n${x + w - r + k} ${y} ${x + w} ${y + r - k} ${x + w} ${y + r} c\n`
+    + `${x + w} ${y + h - r} l\n${x + w} ${y + h - r + k} ${x + w - r + k} ${y + h} ${x + w - r} ${y + h} c\n`
+    + `${x + r} ${y + h} l\n${x + r - k} ${y + h} ${x} ${y + h - r + k} ${x} ${y + h - r} c\n`
+    + `${x} ${y + r} l\n${x} ${y + r - k} ${x + r - k} ${y} ${x + r} ${y} c\nh S\n`;
+}
+
 // ( ) and \ end or escape a PDF string literal, so a child called
 // "Jo (Jojo)" would otherwise produce a file no reader can open.
 function pdfString(str) {
@@ -148,34 +179,76 @@ async function buildBookPdf({ childName, theme, pages }) {
   const fontBold = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold' + enc + ' >>');
   const fontReg = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica' + enc + ' >>');
 
-  // --- the cover, matching what jsPDF has always drawn ---
+  // --- the drawings, as reusable image objects ---
+  // Made before the cover, so the cover can point at the first one. Referencing
+  // it costs nothing: the same bytes, drawn twice.
+  const imgObjs = encoded.map((img) => add({
+    dict: '<< /Type /XObject /Subtype /Image /Width ' + img.width + ' /Height ' + img.height
+      + ' /ColorSpace /DeviceGray /BitsPerComponent ' + BITS
+      + ' /Filter /FlateDecode /Length ' + img.stream.length + ' >>',
+    data: img.stream
+  }));
+
+  // --- the cover ---
+  //
+  // It used to be three lines of type on white, which said nothing about whose
+  // book it was. The point of this product is that the child is in it, so the
+  // cover shows them: their own first page, framed, under their name. A child
+  // handed this sees themselves before they open it.
+  //
+  // Everything on it is black line art, like the rest of the book - so it costs
+  // no colour ink to print, and it can be coloured in like any other page.
   const line = (str, size, bold, yInches) => {
     const x = (PAGE - textWidth(str, size, bold)) / 2;
-    const y = PAGE - yInches * PT;          // jsPDF measures y from the top
+    const y = PAGE - yInches * PT;          // measured from the top, as jsPDF did
     return `BT /${bold ? 'F1' : 'F2'} ${size} Tf 1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm ${pdfString(str)} Tj ET\n`;
   };
-  const cover = line(who + "'s", 26, true, 3.6)
-    + line((theme || 'Coloring') + ' Story', 26, true, 4.3)
-    + line('A custom coloring book', 12, false, 5.0);
+
+  const nameLine = who + "'s";
+  const themeLine = (theme || 'Coloring') + ' Story';
+  const maxTextWidth = PAGE - 1.1 * PT * 2;
+  const nameSize = fitSize(nameLine, maxTextWidth, [40, 36, 32, 28, 24, 20], true);
+  const themeSize = fitSize(themeLine, maxTextWidth, [26, 23, 20, 18, 16], true);
+
+  const artSide = 4.1 * PT;
+  const artLeft = (PAGE - artSide) / 2;
+  const artBottom = PAGE - 6.65 * PT;
+  const pad = 0.14 * PT;
+
+  let cover = '';
+  // Stars in the four corners, well clear of the type.
+  cover += '0 g\n';
+  for (const [sx, sy] of [[0.62, 0.72], [7.88, 0.72], [0.62, 7.78], [7.88, 7.78]]) {
+    cover += star(sx * PT, PAGE - sy * PT, 13);
+  }
+  cover += line(nameLine, nameSize, true, 1.22);
+  cover += line(themeLine, themeSize, true, 1.95);
+  // A small star between the title and the picture, as a divider.
+  cover += star(PAGE / 2, PAGE - 2.28 * PT, 8);
+  // The frame, then the drawing inside it. No drawing, no frame - an empty box
+  // on the cover reads as a fault rather than a design.
+  if (imgObjs.length) {
+    cover += `q 2.5 w 0 G\n${roundedRect(artLeft - pad, artBottom - pad, artSide + pad * 2, artSide + pad * 2, 14)}Q\n`;
+    cover += `q\n${artSide.toFixed(2)} 0 0 ${artSide.toFixed(2)} ${artLeft.toFixed(2)} ${artBottom.toFixed(2)} cm\n/Im0 Do\nQ\n`;
+    cover += line('Color me in!', 15, false, 7.08);
+  }
+  cover += line(pageCountLine(encoded.length), 11, false, 7.52);
+
   const coverStream = add({ dict: '<< /Length ' + Buffer.byteLength(cover) + ' >>', data: Buffer.from(cover, 'latin1') });
+  const coverRes = '/Font << /F1 ' + fontBold + ' 0 R /F2 ' + fontReg + ' 0 R >>'
+    + (imgObjs.length ? ' /XObject << /Im0 ' + imgObjs[0] + ' 0 R >>' : '');
   pageRefs.push(add(
     `<< /Type /Page /Parent ${pagesObj} 0 R /MediaBox [0 0 ${PAGE} ${PAGE}] `
-    + `/Resources << /Font << /F1 ${fontBold} 0 R /F2 ${fontReg} 0 R >> >> /Contents ${coverStream} 0 R >>`));
+    + `/Resources << ${coverRes} >> /Contents ${coverStream} 0 R >>`));
 
   // --- one page per drawing ---
-  for (const img of encoded) {
-    const imgObj = add({
-      dict: '<< /Type /XObject /Subtype /Image /Width ' + img.width + ' /Height ' + img.height
-        + ' /ColorSpace /DeviceGray /BitsPerComponent ' + BITS
-        + ' /Filter /FlateDecode /Length ' + img.stream.length + ' >>',
-      data: img.stream
-    });
+  imgObjs.forEach((imgObj) => {
     const content = `q\n${ART} 0 0 ${ART} ${MARGIN} ${MARGIN} cm\n/Im0 Do\nQ\n`;
     const contentObj = add({ dict: '<< /Length ' + Buffer.byteLength(content) + ' >>', data: Buffer.from(content, 'latin1') });
     pageRefs.push(add(
       `<< /Type /Page /Parent ${pagesObj} 0 R /MediaBox [0 0 ${PAGE} ${PAGE}] `
       + `/Resources << /XObject << /Im0 ${imgObj} 0 R >> >> /Contents ${contentObj} 0 R >>`));
-  }
+  });
 
   objects[kidsPlaceholder - 1] = `<< /Type /Catalog /Pages ${pagesObj} 0 R >>`;
   objects[pagesObj - 1] = `<< /Type /Pages /Count ${pageRefs.length} /Kids [`
@@ -207,6 +280,10 @@ async function buildBookPdf({ childName, theme, pages }) {
   push(`trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
 
   return Buffer.concat(chunks);
+}
+
+function pageCountLine(n) {
+  return n === 1 ? '1 page to color' : n + ' pages to color';
 }
 
 function pdfFileName(childName) {
