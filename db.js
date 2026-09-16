@@ -68,6 +68,12 @@ const CREATE_TABLE_SQL = `
 // Generated artwork, one row per scene. Kept so a customer can re-download
 // their book without us paying OpenAI to redraw it.
 const CREATE_PAGES_SQL = `
+  CREATE TABLE IF NOT EXISTS order_pdfs (
+    order_id   INTEGER     PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+    pdf        BYTEA       NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
   CREATE TABLE IF NOT EXISTS order_pages (
     order_id    INTEGER     NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     scene_index INTEGER     NOT NULL,
@@ -345,6 +351,32 @@ async function savePage(orderId, sceneIndex, image) {
      ON CONFLICT (order_id, scene_index) DO UPDATE SET image = EXCLUDED.image`,
     [Number(orderId), Number(sceneIndex), image]
   );
+}
+
+// The finished PDF, in its own table so that it is never dragged along by the
+// SELECT * reads of the orders row - one of which is the access poll the
+// waiting page runs every five seconds. Nothing but the download and the email
+// ever wants these bytes.
+async function saveBookPdf(orderId, buffer) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(orderId));
+    if (o) o.pdf = buffer;
+    return;
+  }
+  await pool.query(
+    `INSERT INTO order_pdfs (order_id, pdf) VALUES ($1, $2)
+     ON CONFLICT (order_id) DO UPDATE SET pdf = EXCLUDED.pdf, created_at = NOW()`,
+    [Number(orderId), buffer]
+  );
+}
+
+async function getBookPdf(orderId) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(orderId));
+    return (o && o.pdf) || null;
+  }
+  const { rows } = await pool.query('SELECT pdf FROM order_pdfs WHERE order_id = $1', [Number(orderId)]);
+  return (rows[0] && rows[0].pdf) || null;
 }
 
 async function listPages(orderId) {
@@ -726,6 +758,8 @@ module.exports = {
   bumpRenderAttempts,
   savePage,
   listPages,
+  saveBookPdf,
+  getBookPdf,
   deleteOrder,
   listOrders,
   getOrder,
