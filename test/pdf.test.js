@@ -126,6 +126,41 @@ async function main() {
   check('brackets in a name are escaped', bracket.toString('latin1').includes('(Jo \\(Jojo\\)\'s)'), true);
   check('and it is still a readable PDF', pageCount(bracket), 2);
 
+  console.log('\nThe cover carries the child, not just their name');
+
+  // A cover with only type on it says nothing about whose book it is. It shows
+  // the first drawing now, which is the point of the product.
+  const withArt = cover.toString('latin1');
+  check('it invites the child in', withArt.includes('(Color me in!)'), true);
+  check('and says how much there is', withArt.includes('(1 page to color)'), true);
+  check('plural when there is more than one',
+    (await buildBookPdf({ childName: 'Ava', theme: 'Portrait', pages: sized }))
+      .toString('latin1').includes('(5 pages to color)'), true);
+
+  // The drawing on the cover is the same object as page one, referenced twice.
+  // Embedding a second copy would put a megabyte back on every book.
+  const oneImage = (cover.toString('latin1').match(/\/Subtype\s*\/Image/g) || []).length;
+  check('the cover reuses page one rather than embedding it again', oneImage, 1);
+
+  // A name long enough to run off the edge is set smaller instead. The name is
+  // the biggest thing on the cover, so this is the one that has to give.
+  const titleSize = async (name) => {
+    const b = await buildBookPdf({ childName: name, theme: 'Portrait', pages: [sized[0]] });
+    return [...b.toString('latin1').matchAll(/\/F1 (\d+) Tf/g)].map((m) => Number(m[1]))[0];
+  };
+  check('an ordinary name gets the full size', await titleSize('Ava'), 40);
+  // "Maximilliana-Rose's" is 19 characters and still fits at 40pt - the shrink
+  // only starts past that, which is where it should start.
+  check('and so does a properly long one', await titleSize('Maximilliana-Rose'), 40);
+  check('a very long name is set smaller', await titleSize('Maria Fernanda Gonzalez') < 40, true);
+  check('and a longer one smaller still',
+    await titleSize('Alexandria Wilhelmina Rose') < await titleSize('Maria Fernanda Gonzalez'), true);
+
+  // No drawings, no empty frame - that reads as a fault rather than a design.
+  const bare = await buildBookPdf({ childName: 'Ava', theme: 'Portrait', pages: [] });
+  check('a book with no pages still makes a cover', pageCount(bare), 1);
+  check('with no empty picture frame on it', bare.toString('latin1').includes('(Color me in!)'), false);
+
   console.log('\nThe images inside it');
 
   const dict = pdf.toString('latin1');
