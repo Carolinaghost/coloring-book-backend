@@ -46,9 +46,23 @@ function minutesSince(t) { return Math.floor((Date.now() - new Date(t).getTime()
 // specific thing (the order) and not just the kind of problem.
 // ---------------------------------------------------------------------------
 
-async function checkOrders({ db }) {
+async function checkOrders({ db, runtime }) {
   const found = [];
   const orders = await db.ordersNeedingAttention(STUCK_MINUTES);
+
+  // Orders paid before we started recording ready-emails have a null timestamp
+  // because the column did not exist, not because nobody was told. Judging them
+  // means emailing customers their book a second time, so they are left alone.
+  // Null means nothing has been recorded yet and no order can be judged; the
+  // failure counter still catches a genuinely broken email in that window.
+  const recordingSince = db.emailRecordingSince ? await db.emailRecordingSince() : null;
+  const judged = (o) => recordingSince && new Date(o.paidAt) >= new Date(recordingSince);
+
+  // Every slot busy means a waiting order is queued, not stuck. Saying
+  // "generation never started" about a book that is third in line is a false
+  // alarm, and under load it would be one per queued order.
+  const atCapacity = runtime && runtime.maxConcurrent
+    && runtime.renderingNow >= runtime.maxConcurrent;
 
   for (const o of orders) {
     const mins = minutesSince(o.paidAt);
@@ -56,13 +70,15 @@ async function checkOrders({ db }) {
     const done = o.generationStatus === 'done';
 
     if (!done && o.pagesReady === 0 && o.generationStatus === 'idle') {
-      found.push({
-        key: `order:${o.id}:never-started`, level: 'CRITICAL', orderId: o.id,
-        fix: o.hasPhoto ? 'rekick' : null,
-        subject: `Order ${o.id} paid ${mins} min ago, no pages`,
-        detail: `Paid ${mins} minutes ago and generation never started. `
-          + (o.hasPhoto ? 'The photo is still there, so it can be picked up.' : 'The photo is gone, so this needs a person.')
-      });
+      if (!atCapacity) {
+        found.push({
+          key: `order:${o.id}:never-started`, level: 'CRITICAL', orderId: o.id,
+          fix: o.hasPhoto ? 'rekick' : null,
+          subject: `Order ${o.id} paid ${mins} min ago, no pages`,
+          detail: `Paid ${mins} minutes ago and generation never started. `
+            + (o.hasPhoto ? 'The photo is still there, so it can be picked up.' : 'The photo is gone, so this needs a person.')
+        });
+      }
     } else if (!done && o.pagesReady < total) {
       found.push({
         key: `order:${o.id}:stalled`, level: 'CRITICAL', orderId: o.id,
@@ -73,20 +89,22 @@ async function checkOrders({ db }) {
       });
     }
 
-    if (done && o.email && !o.readyEmailAt) {
-      found.push({
-        key: `order:${o.id}:not-told`, level: 'CRITICAL', orderId: o.id, fix: 'resend',
-        subject: `Order ${o.id} finished but the customer was not told`,
-        detail: `The book is done and no ready-email is recorded as sent.`
-      });
-    }
-
-    if (o.readyEmailFails > 0 && !o.readyEmailAt) {
-      found.push({
-        key: `order:${o.id}:email-failed`, level: 'CRITICAL', orderId: o.id, fix: 'resend',
-        subject: `Order ${o.id} ready-email failed ${o.readyEmailFails}x`,
-        detail: `The email has been attempted ${o.readyEmailFails} time(s) and has not gone.`
-      });
+    // One problem, one alert. A finished order whose email also failed used to
+    // raise both of these and send two emails about the same customer.
+    if (o.email && !o.readyEmailAt && (done || o.readyEmailFails > 0)) {
+      if (o.readyEmailFails > 0) {
+        found.push({
+          key: `order:${o.id}:email-failed`, level: 'CRITICAL', orderId: o.id, fix: 'resend',
+          subject: `Order ${o.id} ready-email failed ${o.readyEmailFails}x`,
+          detail: `The email has been attempted ${o.readyEmailFails} time(s) and has not gone.`
+        });
+      } else if (done && judged(o)) {
+        found.push({
+          key: `order:${o.id}:not-told`, level: 'CRITICAL', orderId: o.id, fix: 'resend',
+          subject: `Order ${o.id} finished but the customer was not told`,
+          detail: `The book is done and no ready-email is recorded as sent.`
+        });
+      }
     }
   }
   return found;
