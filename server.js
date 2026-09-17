@@ -194,6 +194,9 @@ app.post('/orders', async (req, res) => {
       // kept so the server can draw the book after payment without the browser
       photo: typeof req.body.photo === 'string' ? req.body.photo : null,
       subjectType: req.body.subjectType === 'adult' ? 'adult' : 'kid',
+      // How busy the pages are. Stored with the order so a re-render months
+      // later comes back the same book, not a different one.
+      detailLevel: normalizeDetail(req.body.detailLevel),
       // A family book: one entry per person, each carrying their own photo.
       // Absent or a single entry and this stays an ordinary one-subject book.
       people: cleanPeople(req.body.people),
@@ -590,6 +593,50 @@ if (!CAN_CALL_OPENAI) {
 
 const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands - never fill hair with solid black, dense scribbles or crosshatching, no matter how dark or curly the hair is in the photo. Every part of the drawing must be left white so a child can color it in.';
 
+// BASE_STYLE fixes the look - bold outlines, no shading, no text, open hair -
+// but says nothing about how MUCH is in the picture. Left to itself the model
+// picked a different busyness every time: one page came back with shelves,
+// jars, curtains, a utensil pot and a cookie tray, the next with a bare wall
+// and a fridge. Same input, same book, wildly different pages.
+//
+// So the amount of scenery is now chosen by the customer, on behalf of whoever
+// is holding the crayon. This changes the PAGE, never the CHARACTER: the people
+// still look like their photos at every level. And it is an addition to
+// BASE_STYLE, not a replacement - no text, no shading and open hair hold at all
+// three.
+const DETAIL_LEVELS = {
+  simple: {
+    label: 'Simple',
+    ages: '3-4',
+    // "Nearly empty" is one word away from "empty", and an empty page with a
+    // child floating on it is not a coloring page - hence the second sentence.
+    prompt: 'Detail level: very simple, drawn for a three or four year old to colour. Use very thick outlines and only a handful of large, clearly separated shapes. Keep the background nearly bare - one or two big objects at most - but keep enough of it that the scene still reads as a real place. Every area to be coloured should be large and open enough for a small child to fill without going over the line.'
+  },
+  standard: {
+    label: 'Standard',
+    ages: '5-7',
+    prompt: 'Detail level: moderate, drawn for a five to seven year old to colour. Use bold outlines. Give the scene a recognisable setting with a few background objects. Keep the areas to be coloured medium sized.'
+  },
+  detailed: {
+    label: 'Detailed',
+    ages: '8+',
+    // More background objects means more jars, signs and books - exactly the
+    // things that tempt the model into lettering them - and "finer outlines"
+    // is how a drawing starts sliding into shading. Both are named here
+    // rather than left to BASE_STYLE to carry alone.
+    prompt: 'Detail level: busy, drawn for a child of eight or older to colour. Use finer outlines. Fill the scene out with background objects, decorative patterns and smaller enclosed areas to colour. Finer means thinner clean outlines, never shading, grey tones or crosshatching, and every one of those added objects stays blank - no letters, words or numbers anywhere in the picture.'
+  }
+};
+const DEFAULT_DETAIL = 'standard';
+
+// Anything unrecognised - absent, misspelt, an old browser that does not know
+// the field - lands on the middle band. Omitting the instruction is what
+// produced the random swing in the first place, so there is no "no value".
+function normalizeDetail(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(DETAIL_LEVELS, key) ? key : DEFAULT_DETAIL;
+}
+
 // The photo goes to the model through /images/edits, which by default hands
 // back something close to the photo it was given: same pose, same crop, same
 // angle. Naming a camera is not enough on its own - the photo has to be
@@ -889,7 +936,7 @@ const STORY_SCENES = {
 // people is optional: pass it for a family book, where each person has their own
 // photo and their own name, and leave it out for the single-subject book, which
 // still works off childCount and one photo exactly as it always did.
-function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people) {
+function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people, detail) {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
   let scene = scenes[sceneIndex] || scenes[0];
   const cast = cleanPeople(people);
@@ -908,6 +955,9 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people) 
   if (notes && notes.trim()) {
     prompt += ` Also incorporate this detail where it fits naturally: ${notes.trim()}.`;
   }
+  // Last, and deliberately so. This is the instruction the model was ignoring
+  // when nobody gave it one, and the end of the prompt is where it listens.
+  prompt += ` ${DETAIL_LEVELS[normalizeDetail(detail)].prompt}`;
   return prompt;
 }
 
@@ -1119,7 +1169,7 @@ async function renderBook(orderId) {
         const slot = nextUp++;
         if (slot >= todo.length) return;
         const sceneIndex = todo[slot];
-        const prompt = buildPrompt(order.theme, sceneIndex, order.childCount, subjectType, order.notes, cast);
+        const prompt = buildPrompt(order.theme, sceneIndex, order.childCount, subjectType, order.notes, cast, order.detailLevel);
         try {
           const image = await renderScene({ photos: references, prompt, paid: true });
           await db.savePage(orderId, sceneIndex, image);
@@ -1249,6 +1299,12 @@ app.get('/stats', async (req, res) => {
 app.get('/options', (req, res) => {
   res.json({
     themes: Object.keys(STORY_SCENES),
+    // The site builds its picker from this, so the bands and their labels are
+    // defined in one place and cannot drift apart.
+    detailLevels: Object.keys(DETAIL_LEVELS).map((key) => ({
+      key, label: DETAIL_LEVELS[key].label, ages: DETAIL_LEVELS[key].ages
+    })),
+    defaultDetailLevel: DEFAULT_DETAIL,
     freePreviewPages: FREE_PREVIEW_PAGES,
     priceCents: PRICE_CENTS,
     family: {
@@ -1380,8 +1436,11 @@ app.post('/convert', upload.fields([
     childCount = Math.min(Math.max(childCount, 1), 3);
     const subjectType = req.body.subjectType === 'adult' ? 'adult' : 'kid';
     const notes = (req.body.notes || '').slice(0, 300);
+    // A paid order draws from what it was sold with; a free preview takes the
+    // browser's word for it. Either way something is always chosen.
+    const detailLevel = paidOrder ? paidOrder.detailLevel : normalizeDetail(req.body.detailLevel);
 
-    const prompt = buildPrompt(theme, sceneIndex, childCount, subjectType, notes, cast);
+    const prompt = buildPrompt(theme, sceneIndex, childCount, subjectType, notes, cast, detailLevel);
 
     let image;
     try {
@@ -1792,4 +1851,4 @@ if (require.main === module) {
 }
 
 module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
-  sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES };
+  sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
