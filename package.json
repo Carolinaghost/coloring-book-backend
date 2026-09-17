@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/funnel.test.js && node test/samples.test.js && node test/mirror-guard.test.js && node test/family.test.js && node test/checkout.test.js && node test/waiting.test.js && node test/pdf.test.js && node test/watchdog.test.js"
+    "test": "node test/funnel.test.js && node test/samples.test.js && node test/mirror-guard.test.js && node test/family.test.js && node test/checkout.test.js && node test/waiting.test.js && node test/pdf.test.js && node test/watchdog.test.js && node test/page-encode.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

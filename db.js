@@ -9,6 +9,7 @@
 
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const { encodeForStorage } = require('./page-encode');
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const usingPostgres = Boolean(DATABASE_URL);
@@ -370,7 +371,11 @@ async function getOrderWithToken(id) {
   return order;
 }
 
-async function savePage(orderId, sceneIndex, image) {
+// Pages are shrunk on the way in - see page-encode.js. Doing it here rather
+// than at the call sites means there is one door into order_pages and nothing
+// can slip past it storing a full-colour photograph of a line drawing.
+async function savePage(orderId, sceneIndex, rawImage) {
+  const image = await encodeForStorage(rawImage);
   if (!usingPostgres) return;
   await pool.query(
     `INSERT INTO order_pages (order_id, scene_index, image)
@@ -932,6 +937,9 @@ async function purgeOldEvents(days) {
 }
 
 module.exports = {
+  // Scripts that need raw SQL (scripts/reencode-pages.js) reach the pool here.
+  // Null when running on the in-memory store, which those scripts check for.
+  get pool() { return pool; },
   usingPostgres,
   status,
   initDb,
