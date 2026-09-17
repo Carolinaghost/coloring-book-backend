@@ -3,11 +3,14 @@
 
 // Shrinks pages already sitting in order_pages.
 //
-//   node scripts/reencode-pages.js                 look, change nothing
-//   node scripts/reencode-pages.js --limit 5       try five orders for real
-//   node scripts/reencode-pages.js --write         do the lot
+//   node scripts/reencode-pages.js                     look, change nothing
+//   node scripts/reencode-pages.js --write --limit 5   do five, for real
+//   node scripts/reencode-pages.js --write             do the lot
 //
-// DRY RUN BY DEFAULT. Nothing is written without --write.
+// NOTHING IS WRITTEN WITHOUT --write. Not even with --limit: --limit only says
+// how many orders to look at, and on its own it is still a dry run. That is
+// exactly the mistake that wasted a first attempt at this migration, so the
+// output now says which mode it is in on every single line.
 //
 // This rewrites customer data and the original pixels do not come back, so the
 // reasons it is safe are worth stating rather than assuming:
@@ -64,7 +67,30 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(WRITE ? '\nWRITING. This rewrites stored pages.' : '\nDry run. Nothing will be written.');
+  if (WRITE) {
+    console.log('\n=== WRITING === stored pages will be rewritten.\n');
+  } else {
+    console.log('\n=== DRY RUN === nothing will be written.');
+    if (LIMIT !== Infinity) {
+      console.log('    (--limit on its own does NOT write. Add --write.)');
+    }
+    console.log('');
+  }
+
+  // The same measure the owner's SQL reports, so the two can be compared
+  // directly rather than argued about.
+  const measure = async () => {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS pages,
+              COALESCE(SUM(length(image)), 0)::bigint AS bytes,
+              COUNT(*) FILTER (WHERE length(image) >  300000)::int AS still_large,
+              COUNT(*) FILTER (WHERE length(image) <= 300000)::int AS already_small
+         FROM order_pages`);
+    return rows[0];
+  };
+  const started = await measure();
+  console.log(`before:  ${started.pages} pages, ${mb(Number(started.bytes))}, `
+    + `${started.still_large} still large, ${started.already_small} already small\n`);
 
   const { rows: orders } = await pool.query(
     `SELECT o.id, o.generation_status,
@@ -106,17 +132,32 @@ async function main() {
 
     before += oBefore; after += oAfter; changed += oChanged; done++;
     const saved = oBefore - oAfter;
-    console.log(`  order ${String(o.id).padStart(4)}  ${String(pages.length).padStart(2)} pages  `
+    console.log(`  ${WRITE ? 'wrote ' : 'would '} order ${String(o.id).padStart(4)}  ${String(pages.length).padStart(2)} pages  `
       + `${mb(oBefore).padStart(8)} -> ${mb(oAfter).padStart(8)}  `
       + (saved > 0 ? `saves ${mb(saved)}` : 'nothing to gain'));
   }
+
+  const finished = await measure();
+  console.log(`\nafter:   ${finished.pages} pages, ${mb(Number(finished.bytes))}, `
+    + `${finished.still_large} still large, ${finished.already_small} already small`);
 
   console.log(`\n${done} order(s) looked at, ${changed} page(s) ${WRITE ? 'rewritten' : 'would be rewritten'}`
     + (skipped ? `, ${skipped} already small` : '')
     + (failed ? `, ${failed} FAILED and left alone` : ''));
   console.log(`  ${mb(before)} -> ${mb(after)}   saves ${mb(before - after)}`
     + (before ? `  (${(before / (after || 1)).toFixed(1)}x smaller)` : ''));
-  if (!WRITE) console.log('\nNothing was written. Re-run with --write to do it.');
+  if (!WRITE) {
+    console.log('\n=== NOTHING WAS WRITTEN. This was a dry run. ===');
+    console.log('    For real:  node scripts/reencode-pages.js --write');
+  } else if (finished.still_large > 0) {
+    console.log(`\n${finished.still_large} page(s) are still large. Re-run to pick them up -`);
+    console.log('    this is safe to run again; a second pass over an already small page does nothing.');
+  } else {
+    console.log('\nEvery page is now small.');
+    console.log('    The database FILE will not have shrunk: an UPDATE leaves the old row');
+    console.log('    version behind. The space is reusable but not returned until the table');
+    console.log('    is rewritten (pg_repack, or VACUUM FULL with the table locked).');
+  }
 
   await db.close?.();
   process.exit(0);
