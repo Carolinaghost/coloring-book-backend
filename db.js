@@ -62,6 +62,8 @@ const CREATE_TABLE_SQL = `
     -- without needing their browser to stay open
     photo             TEXT,
     subject_type      TEXT        NOT NULL DEFAULT 'kid',
+    -- how busy the pages are: simple, standard or detailed
+    detail_level      TEXT        NOT NULL DEFAULT 'standard',
     generation_status TEXT        NOT NULL DEFAULT 'idle'
   );
 `;
@@ -138,6 +140,9 @@ const MIGRATIONS = [
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS photo TEXT",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS generation_status TEXT NOT NULL DEFAULT 'idle'",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS subject_type TEXT NOT NULL DEFAULT 'kid'",
+  // Orders taken before the customer could choose read as 'standard', which is
+  // the middle band - the same thing they were most likely already getting.
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS detail_level TEXT NOT NULL DEFAULT 'standard'",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS render_attempts INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS visitor TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''",
@@ -240,6 +245,7 @@ function rowToOrder(row) {
     product: row.product,
     generationStatus: row.generation_status || 'idle',
     subjectType: row.subject_type || 'kid',
+    detailLevel: row.detail_level || 'standard',
     visitor: row.visitor || '',
     source: row.source || '',
     campaign: row.campaign || '',
@@ -273,8 +279,8 @@ async function saveOrder(order) {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token, photo, subject_type, visitor, source, campaign, people)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    `INSERT INTO orders (child_name, child_count, email, theme, notes, thumb, page_count, access_token, photo, subject_type, detail_level, visitor, source, campaign, people)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      RETURNING *`,
     [
       order.childName,
@@ -287,6 +293,7 @@ async function saveOrder(order) {
       accessToken,
       order.photo || null,
       order.subjectType === 'adult' ? 'adult' : 'kid',
+      order.detailLevel || 'standard',
       order.visitor || '',
       order.source || '',
       order.campaign || '',

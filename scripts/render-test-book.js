@@ -14,6 +14,7 @@
 //   --theme <name>    story theme                          (default Superhero)
 //   --subject <type>  kid | adult                          (default kid)
 //   --pages <n>       render only the first n pages        (default all 15)
+//   --detail <level>  simple | standard | detailed          (default standard)
 //   --notes <text>    the customer's extra detail, if any
 //   --out <dir>       where to write the pages             (default ./test-book)
 //
@@ -22,7 +23,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { buildPrompt, renderScene, canCallOpenAI, STORY_SCENES } = require('../server');
+const { buildPrompt, renderScene, canCallOpenAI, STORY_SCENES, DETAIL_LEVELS, normalizeDetail } = require('../server');
 
 function parseArgs(argv) {
   const args = {};
@@ -47,6 +48,10 @@ async function main() {
   const kids = Math.min(3, Math.max(1, parseInt(args.kids, 10) || 2));
   const subjectType = args.subject === 'adult' ? 'adult' : 'kid';
   const notes = args.notes && args.notes !== 'true' ? args.notes : '';
+  if (args.detail && !DETAIL_LEVELS[String(args.detail).toLowerCase()]) {
+    throw new Error(`Unknown detail level "${args.detail}". Try one of: ${Object.keys(DETAIL_LEVELS).join(', ')}`);
+  }
+  const detail = normalizeDetail(args.detail);
   const outDir = args.out || './test-book';
 
   const scenes = STORY_SCENES[theme];
@@ -59,13 +64,13 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
 
   console.log(`Theme "${theme}", ${kids} ${subjectType === 'adult' ? 'adult(s)' : 'kid(s)'}, `
-    + `${total} page(s) -> ${outDir}`);
+    + `detail "${detail}", ${total} page(s) -> ${outDir}`);
   console.log(`That is ${total} image API call(s) against your key.\n`);
 
   const prompts = [];
   let failed = 0;
   for (let i = 0; i < total; i++) {
-    const prompt = buildPrompt(theme, i, kids, subjectType, notes);
+    const prompt = buildPrompt(theme, i, kids, subjectType, notes, null, detail);
     prompts.push(`--- page ${i + 1} ---\n${prompt}\n`);
     const label = `page ${String(i + 1).padStart(2, '0')}/${total}`;
     const camera = (prompt.match(/Camera: (.*?)\.(?:\s|$)/) || [])[1] || '';
