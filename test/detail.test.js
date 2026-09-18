@@ -114,6 +114,14 @@ async function main() {
         /any field of small dots/.test(prompt), true);
       check(`${path}/${level} rules out speckled texture on a beard`,
         /never speckles, flecks or shaded texture/.test(prompt), true);
+      // Hair came back colourable but as the busiest thing on the page: a
+      // curtain of very fine parallel strands. "A few strands" was already
+      // there and was being read as a few hundred, so what this adds is the
+      // spacing, not a smaller count.
+      check(`${path}/${level} rules out a curtain of parallel strands`,
+        /dense curtain of many fine parallel strands/.test(prompt), true);
+      check(`${path}/${level} asks for white between the strands`,
+        /well separated, with plenty of white showing between them/.test(prompt), true);
     }
   }
 

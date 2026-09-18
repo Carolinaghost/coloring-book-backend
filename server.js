@@ -602,11 +602,19 @@ if (!CAN_CALL_OPENAI) {
 // "a field of small dots", never "dots": freckles are dots, they are wanted,
 // and they are all over the sample pages. This bans the mass, not the mark.
 //
+// "A dense curtain of many fine parallel strands" is the third failure this
+// sentence has met, and it is named for the same reason stippling is: the list
+// only stops what it can name. "A few strands" was already there and was being
+// read as a few hundred, so the count is not what was missing - the spacing
+// was. Hence "well separated, with plenty of white showing between them",
+// which is a positive instruction; the ban alone would push toward a bald head,
+// and a bald head is a worse page than a busy one.
+//
 // Beards get their own sentence because "hair" did not reach them. A dad with a
 // few days of stubble came back with a chin of hundreds of tiny dots - already
 // grey, nothing left for a child to colour - while the hair on his head obeyed
 // the rule perfectly.
-const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands - never fill hair with solid black, dense scribbles, crosshatching, stippling or any field of small dots, no matter how dark or curly the hair is in the photo. Draw a beard, moustache or stubble the same way: one clean outline around the shape of it and open white inside, never speckles, flecks or shaded texture, however short the hair is. Every part of the drawing must be left white so a child can color it in.';
+const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands, well separated, with plenty of white showing between them - never fill hair with solid black, dense scribbles, crosshatching, stippling, any field of small dots, or a dense curtain of many fine parallel strands, no matter how dark or curly the hair is in the photo. Draw a beard, moustache or stubble the same way: one clean outline around the shape of it and open white inside, never speckles, flecks or shaded texture, however short the hair is. Every part of the drawing must be left white so a child can color it in.';
 
 // BASE_STYLE fixes the look - bold outlines, no shading, no text, open hair -
 // but says nothing about how MUCH is in the picture. Left to itself the model
