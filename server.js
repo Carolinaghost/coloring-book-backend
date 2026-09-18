@@ -610,6 +610,17 @@ if (!CAN_CALL_OPENAI) {
 // which is a positive instruction; the ban alone would push toward a bald head,
 // and a bald head is a worse page than a busy one.
 //
+// Whoever changes this next: the regression render has to be somebody with LONG
+// hair, at the SIMPLE detail level. Owen is a close crop and his hair will look
+// fine however this sentence is worded, so a page of him proves nothing either
+// way. set1-mom is the reference that exposes it. Simple is where an
+// over-correction shows first, because that is where the model is already being
+// told to leave things out.
+//
+//   node scripts/render-family-book.js \
+//     --photos "https://crayonauts.com/samples/examples/set1-mom.png,https://crayonauts.com/samples/examples/set1-dad.png" \
+//     --names "Mum,Dad" --types "adult,adult" --detail simple --pages 2
+//
 // Beards get their own sentence because "hair" did not reach them. A dad with a
 // few days of stubble came back with a chin of hundreds of tiny dots - already
 // grey, nothing left for a child to colour - while the hair on his head obeyed
