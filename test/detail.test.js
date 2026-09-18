@@ -19,7 +19,7 @@
 
 const http = require('http');
 
-const { app, buildPrompt, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail } = require('../server.js');
+const { app, buildPrompt, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail, BASE_STYLE } = require('../server.js');
 
 let pass = 0;
 const failures = [];
@@ -81,14 +81,47 @@ async function main() {
 
   console.log('\nThe level adds to the house rules, it does not replace them');
 
-  for (const level of LEVELS) {
-    const prompt = buildPrompt('Superhero', 3, 1, 'kid', '', null, level);
-    check(`${level} still forbids text`, /no text or captions of any kind/.test(prompt), true);
-    check(`${level} still forbids shading`, /no shading, no gray tones/.test(prompt), true);
-    check(`${level} still leaves hair open`, /open white space/.test(prompt), true);
-    check(`${level} still names the scene and the camera`,
-      /Scene: .*\. Camera: /.test(prompt), true);
+  // Both paths, because they build the prompt through different branches and a
+  // family book is where the beards are.
+  const CAST = [
+    { name: 'Mum', subjectType: 'adult' },
+    { name: 'Dad', subjectType: 'adult' },
+    { name: 'Leo', subjectType: 'kid' }
+  ];
+  const PATHS = [['single', null], ['family', CAST]];
+
+  for (const [path, cast] of PATHS) {
+    for (const level of LEVELS) {
+      const prompt = buildPrompt('Superhero', 3, 1, 'kid', '', cast, level);
+      check(`${path}/${level} still forbids text`, /no text or captions of any kind/.test(prompt), true);
+      check(`${path}/${level} still forbids shading`, /no shading, no gray tones/.test(prompt), true);
+      check(`${path}/${level} still leaves hair open`, /open white space/.test(prompt), true);
+      check(`${path}/${level} still names the scene and the camera`,
+        /Scene: .*\. Camera: /.test(prompt), true);
+
+      // A beard came back as hundreds of tiny dots - already grey, nothing left
+      // for a child to colour - while the hair on the same head obeyed the rule
+      // perfectly, because the rule said "hair" and a beard is not read as hair.
+      // This can only prove the sentence is still in the prompt. Whether the
+      // model obeys it is a question for scripts/render-family-book.js and a
+      // look at the chin.
+      check(`${path}/${level} reaches beards, not just hair`,
+        /beard, moustache or stubble/.test(prompt), true);
+      // Stippling is a field of separate dots, so it was none of the three
+      // things the old list banned and slipped straight past it.
+      check(`${path}/${level} rules out stippling`, /stippling/.test(prompt), true);
+      check(`${path}/${level} rules out a field of small dots`,
+        /any field of small dots/.test(prompt), true);
+      check(`${path}/${level} rules out speckled texture on a beard`,
+        /never speckles, flecks or shaded texture/.test(prompt), true);
+    }
   }
+
+  // Freckles are dots, they are wanted, and they are all over the sample pages.
+  // The ban is on the mass, not the mark - so nothing may forbid dots outright.
+  check('the word dots appears exactly once', (BASE_STYLE.match(/dots/g) || []).length, 1);
+  check('and that once is the field, not dots on their own',
+    /any field of small dots/.test(BASE_STYLE), true);
 
   // Simple is one word away from a blank sheet with a child floating on it.
   check('simple still asks for a place', /reads as a real place/.test(DETAIL_LEVELS.simple.prompt), true);
