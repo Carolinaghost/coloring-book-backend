@@ -122,11 +122,25 @@ async function main() {
         /dense curtain of many fine parallel strands/.test(prompt), true);
       check(`${path}/${level} asks for white between the strands`,
         /well separated, with plenty of white showing between them/.test(prompt), true);
+      // For a while Simple opened up the whole page except the head: four big
+      // shapes in the scene, two hundred lines on the hair. BASE_STYLE sets the
+      // floor; the level says how many strands it wants above it.
+      check(`${path}/${level} says how much hair this level wants`,
+        /\bHair (follows|carries|may carry)\b/.test(prompt), true);
     }
   }
 
   // Freckles are dots, they are wanted, and they are all over the sample pages.
   // The ban is on the mass, not the mark - so nothing may forbid dots outright.
+  // Each level asks for a different amount, and no level is allowed to undo the
+  // floor BASE_STYLE sets - a level may add strands, never density.
+  const hairLines = LEVELS.map((l) => (DETAIL_LEVELS[l].prompt.match(/Hair[^.]*\./) || [''])[0]);
+  check('every level says something about hair', hairLines.filter((h) => !h), []);
+  check('and no two levels say the same thing', new Set(hairLines).size, LEVELS.length);
+  check('simple is the one that names a number', /three or four separate strands/.test(DETAIL_LEVELS.simple.prompt), true);
+  check('detailed adds strands but not density',
+    /more strands, never a denser curtain/.test(DETAIL_LEVELS.detailed.prompt), true);
+
   check('the word dots appears exactly once', (BASE_STYLE.match(/dots/g) || []).length, 1);
   check('and that once is the field, not dots on their own',
     /any field of small dots/.test(BASE_STYLE), true);
