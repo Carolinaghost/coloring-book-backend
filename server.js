@@ -610,6 +610,13 @@ if (!CAN_CALL_OPENAI) {
 // which is a positive instruction; the ban alone would push toward a bald head,
 // and a bald head is a worse page than a busy one.
 //
+// The strand COUNT lives in DETAIL_LEVELS, not here, because it is the one part
+// of hair that should move with the rest of the page. Simple promises large
+// open areas a small child can fill, and for a while it delivered that
+// everywhere except the head - a scene of four big shapes, and a hairstyle of
+// two hundred lines. This sentence sets the floor for every level; each level
+// then says how many strands it wants above that floor.
+//
 // Whoever changes this next: the regression render has to be somebody with LONG
 // hair, at the SIMPLE detail level. Owen is a close crop and his hair will look
 // fine however this sentence is worded, so a page of him proves nothing either
@@ -644,12 +651,12 @@ const DETAIL_LEVELS = {
     ages: '3-4',
     // "Nearly empty" is one word away from "empty", and an empty page with a
     // child floating on it is not a coloring page - hence the second sentence.
-    prompt: 'Detail level: very simple, drawn for a three or four year old to colour. Use very thick outlines and only a handful of large, clearly separated shapes. Keep the background nearly bare - one or two big objects at most - but keep enough of it that the scene still reads as a real place. Every area to be coloured should be large and open enough for a small child to fill without going over the line.'
+    prompt: 'Detail level: very simple, drawn for a three or four year old to colour. Use very thick outlines and only a handful of large, clearly separated shapes. Keep the background nearly bare - one or two big objects at most - but keep enough of it that the scene still reads as a real place. Every area to be coloured should be large and open enough for a small child to fill without going over the line. Hair follows the same rule as everything else here: one or two large open shapes with only three or four separate strands drawn inside them, and nothing finer.'
   },
   standard: {
     label: 'Standard',
     ages: '5-7',
-    prompt: 'Detail level: moderate, drawn for a five to seven year old to colour. Use bold outlines. Give the scene a recognisable setting with a few background objects. Keep the areas to be coloured medium sized.'
+    prompt: 'Detail level: moderate, drawn for a five to seven year old to colour. Use bold outlines. Give the scene a recognisable setting with a few background objects. Keep the areas to be coloured medium sized. Hair carries a small number of separate strands - enough to show which way it falls, few enough to leave large white areas inside it.'
   },
   detailed: {
     label: 'Detailed',
@@ -658,7 +665,7 @@ const DETAIL_LEVELS = {
     // things that tempt the model into lettering them - and "finer outlines"
     // is how a drawing starts sliding into shading. Both are named here
     // rather than left to BASE_STYLE to carry alone.
-    prompt: 'Detail level: busy, drawn for a child of eight or older to colour. Use finer outlines. Fill the scene out with background objects, decorative patterns and smaller enclosed areas to colour. Finer means thinner clean outlines, never shading, grey tones or crosshatching, and every one of those added objects stays blank - no letters, words or numbers anywhere in the picture.'
+    prompt: 'Detail level: busy, drawn for a child of eight or older to colour. Use finer outlines. Fill the scene out with background objects, decorative patterns and smaller enclosed areas to colour. Finer means thinner clean outlines, never shading, grey tones or crosshatching, and every one of those added objects stays blank - no letters, words or numbers anywhere in the picture. Hair may carry a few more strands than at the simpler levels, but they stay separate with clear white between them: more strands, never a denser curtain.'
   }
 };
 const DEFAULT_DETAIL = 'standard';
