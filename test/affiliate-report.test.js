@@ -49,12 +49,19 @@ function errorFrom(fn) {
 
 // Stripe, as far as the report is concerned: the promotion code list and the
 // checkout sessions, and nothing else answers.
-function stripeStub({ codes, sessions }) {
+function stripeStub({ codes, sessions, coupons, byCoupon }) {
   return async (url) => {
-    const path = new URL(url).pathname;
-    const data = path === '/v1/promotion_codes' ? codes
+    const at = new URL(url);
+    const path = at.pathname;
+    // /v1/promotion_codes?coupon=co_1 is a different question from
+    // /v1/promotion_codes, and answering both with the same list would hide
+    // exactly the bug the coupon lookup exists to fix.
+    const owner = at.searchParams.get('coupon');
+    const data = path === '/v1/promotion_codes'
+      ? (owner ? ((byCoupon || {})[owner] || []) : codes)
       : path === '/v1/checkout/sessions' ? sessions
-        : null;
+        : path === '/v1/coupons' ? coupons
+          : null;
     if (!data) throw new Error(`test stub asked for an unexpected path: ${path}`);
     return { ok: true, json: async () => ({ data, has_more: false }) };
   };
@@ -92,6 +99,28 @@ const FIXTURE = {
     { payment_status: 'unpaid', amount_total: 9900, amount_subtotal: 9900, ...withCode('promo_j') }
   ]
 };
+
+// What a restricted key actually returns: no coupon on the promotion code at
+// all. The names have to come back from the coupon side or not at all.
+const RESTRICTED = {
+  codes: [
+    { id: 'promo_j', code: 'JERRELL', active: true },
+    { id: 'promo_o', code: 'OWEN10', active: true }
+  ],
+  coupons: [
+    { id: 'co_1', name: 'Creator tracking' },
+    { id: 'co_2' }
+  ],
+  byCoupon: {
+    co_1: [{ id: 'promo_j' }],
+    co_2: [{ id: 'promo_o' }]
+  },
+  sessions: [paid({ ...withCode('promo_j'), amount_total: 2000, amount_subtotal: 2500 })]
+};
+
+function tableRow(lines, code) {
+  return lines.find((l) => l.startsWith(code + ' ')) || '';
+}
 
 function csvRow(lines, code) {
   return (lines.find((l) => l.startsWith(code + ',')) || '').split(',');
@@ -263,6 +292,22 @@ async function main() {
     /between 0 and 100/.test(
       (await runReport(['--rates', 'JERRELL=250'], FIXTURE).then(() => null, (e) => e.message)) || ''),
     true);
+
+  console.log('\nNaming the coupon when the key will not attach it');
+
+  const rak = await runReport([], RESTRICTED);
+  check('a named coupon is found from the coupon side',
+    /Creator tracking/.test(tableRow(rak.out, 'JERRELL')), true);
+  check('an unnamed coupon falls back to its id, not to a dash',
+    /co_2/.test(tableRow(rak.out, 'OWEN10')), true);
+  check('and the money is untouched by the lookup',
+    csvRow((await runReport(['--csv'], RESTRICTED)).out, 'JERRELL').slice(4),
+    ['20.00', '20', '4.00']);
+
+  // The full-key path must not start asking Stripe for coupons it does not
+  // need: FIXTURE's stub has no /v1/coupons answer, so a stray call throws.
+  check('a key that does attach the coupon asks for nothing extra',
+    /Partner/.test(tableRow((await runReport([], FIXTURE)).out, 'JERRELL')), true);
 
   console.log(`\n${pass} passed, ${failures.length} failed`);
   if (failures.length) {
