@@ -304,11 +304,44 @@ app.post('/orders/:id/status', async (req, res) => {
   }
 });
 
+// Turns the code from a creator's link ("JERRELL") into the promotion code id
+// Stripe wants on a session ("promo_1ABC..."). Returns null for anything it
+// cannot vouch for, which is the signal to fall back to the typing box.
+//
+// Deliberately forgiving about the code itself and unforgiving about the
+// answer: codes get typed into ad captions by hand, so case and stray spaces
+// are fixed here, but only an active code that came back from Stripe is used.
+// Stripe matches `code` exactly, so the upper-casing matters - codes are
+// created upper-case in the dashboard.
+async function resolvePromotionCode(code) {
+  const wanted = String(code || '').trim().toUpperCase();
+  if (!wanted || wanted.length > 64 || !/^[A-Z0-9_-]+$/.test(wanted)) return null;
+  if (!STRIPE_SECRET_KEY) return null;
+  try {
+    const url = new URL('https://api.stripe.com/v1/promotion_codes');
+    url.searchParams.set('code', wanted);
+    url.searchParams.set('active', 'true');
+    url.searchParams.set('limit', '1');
+    const resp = await fetch(url, { headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` } });
+    if (!resp.ok) return null;
+    const body = await resp.json();
+    const found = Array.isArray(body.data) ? body.data[0] : null;
+    // active is checked again rather than trusted from the query: a filter that
+    // silently stopped filtering would quietly start honouring dead codes.
+    return found && found.active && found.id ? found.id : null;
+  } catch (err) {
+    // A creator losing attribution is bad. A checkout that will not open
+    // because Stripe was slow answering a side question is worse.
+    console.error('Could not resolve promotion code:', err.message);
+    return null;
+  }
+}
+
 // Creates a Stripe Checkout Session for an order and returns the URL to send
 // the customer to. Called with the order id and the access token we handed the
 // browser when the order was created.
 app.post('/checkout', async (req, res) => {
-  const { orderId, token, product } = req.body || {};
+  const { orderId, token, product, code } = req.body || {};
   if (!STRIPE_SECRET_KEY) {
     return res.status(500).json({ error: 'Payments are not configured on the server.' });
   }
@@ -340,16 +373,32 @@ app.post('/checkout', async (req, res) => {
       `${order.pageCount || 15} pages starring ${order.childName}`);
     if (isPrint) form.append('shipping_address_collection[allowed_countries][0]', 'US');
 
-    // Influencer codes. Stripe hosts the box, the codes live in the Stripe
-    // dashboard one per influencer, and the code someone types IS the
-    // attribution - Stripe reports sales per promotion code, so there is no
-    // affiliate software to run.
+    // Creator codes. The codes live in the Stripe dashboard, one per creator,
+    // and the code on the session IS the attribution - Stripe reports sales per
+    // promotion code, so there is no affiliate software to run.
     //
-    // This has to be appended before the consent copy below is taken, or only
+    // There are two ways one gets onto a session, and they are mutually
+    // exclusive - Stripe rejects a session that sets both:
+    //
+    //   allow_promotion_codes  Stripe shows a box and the customer types it.
+    //   discounts[]            we attach it, and there is no box.
+    //
+    // A creator posting a link is the whole reason for the second one. A
+    // customer who followed jerrell's link has already "used" his code by
+    // clicking it; asking them to also type it loses most of the attribution,
+    // because most people will not.
+    //
+    // The lookup is what makes this safe to feed from a URL: an unknown,
+    // expired or deactivated code resolves to nothing and the customer simply
+    // gets the ordinary typing box. A bad link can cost a creator their
+    // commission, but it can never stop a sale.
+    //
+    // This has to be settled before the consent copy below is taken, or only
     // one of the two sessions carries it and the box disappears on whichever
-    // path was missed. Never add a discounts[] parameter alongside it: Stripe
-    // rejects a session that sets both.
-    form.append('allow_promotion_codes', 'true');
+    // path was missed.
+    const promoId = await resolvePromotionCode(code);
+    if (promoId) form.append('discounts[0][promotion_code]', promoId);
+    else form.append('allow_promotion_codes', 'true');
 
     // Make the customer tick a box agreeing to immediate delivery before paying.
     // Stripe records the acceptance against the payment, which is the evidence
