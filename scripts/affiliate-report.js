@@ -129,6 +129,26 @@ async function listAll(path, params, deps = {}) {
   }
 }
 
+// A restricted API key hands back promotion codes with no coupon on them at
+// all - not an id, not an expanded object, and asking for expand[]=data.coupon
+// does not change it. The coupon column then reads "-" on every row, which
+// looks like the coupons were deleted rather than like a key permission.
+//
+// Promotion codes can still be listed one coupon at a time, so the link is
+// rebuilt from the other end. Only when it is actually missing: with a full
+// key the codes arrive with their coupon already on them and this costs
+// nothing and asks Stripe for nothing.
+async function couponNames(codes, io) {
+  const names = new Map();
+  if (!codes.length || codes.every((c) => c && c.coupon)) return names;
+  for (const coupon of await listAll('/coupons', {}, io)) {
+    for (const p of await listAll('/promotion_codes', { coupon: coupon.id }, io)) {
+      names.set(p.id, coupon.name || coupon.id);
+    }
+  }
+  return names;
+}
+
 // The promotion code on a session is an ID - "promo_1ABC...", never the
 // "OWEN10" somebody typed. Match against that ID string as the code itself and
 // every sale falls into unattributed: the report runs, prints a tidy table, and
@@ -220,12 +240,13 @@ async function main(deps = {}) {
   // Every code, including the ones nobody used - an influencer with zero sales
   // is a thing you want to see, not a row that quietly goes missing.
   const codes = await listAll('/promotion_codes', {}, io);
+  const couponFor = await couponNames(codes, io);
   const byId = new Map();
   codes.forEach((c) => {
     const upper = String(c.code || '').toUpperCase();
     byId.set(c.id, {
       code: c.code,
-      coupon: (c.coupon && (c.coupon.name || c.coupon.id)) || '-',
+      coupon: (c.coupon && (c.coupon.name || c.coupon.id)) || couponFor.get(c.id) || '-',
       active: c.active,
       // Resolved once, here, so the rate column, the owed column and the CSV
       // all read the same number. Working it out again at print time is how a
@@ -317,4 +338,4 @@ if (require.main === module) {
   main().catch((err) => { console.error('\nFailed:', err.message); process.exit(1); });
 }
 
-module.exports = { promoIdFromSession, attribute, tally, listAll, csvCell, parseArgs, parseRates, main };
+module.exports = { promoIdFromSession, attribute, tally, listAll, csvCell, parseArgs, parseRates, couponNames, main };
