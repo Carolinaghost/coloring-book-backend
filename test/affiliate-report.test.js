@@ -13,10 +13,14 @@
 //     and would never see, and it used to look identical to a direct sale
 //   - Stripe's default page is TEN, so a report that takes the first page and
 //     stops loses everything after the tenth session and looks healthy doing it
+//   - everyone is not on the same commission, so one --rate pays somebody the
+//     wrong percentage and prints the same confident total either way
 //
 // Nothing here touches Stripe. The fetch is a stub.
 
-const { promoIdFromSession, attribute, tally, listAll, csvCell } = require('../scripts/affiliate-report.js');
+const {
+  promoIdFromSession, attribute, tally, listAll, csvCell, parseRates, main: runMain
+} = require('../scripts/affiliate-report.js');
 
 let pass = 0;
 const failures = [];
@@ -36,6 +40,62 @@ function check(label, got, want) {
 function row(code) { return { code, coupon: '-', active: true, sales: 0, paid: 0, list: 0 }; }
 function paid(extra) { return { payment_status: 'paid', amount_total: 1900, amount_subtotal: 2000, ...extra }; }
 function withCode(id) { return { discounts: [{ promotion_code: id, coupon: 'co_1' }] }; }
+
+// The message a call throws, or null if it did not. Named for what it hands
+// back, because main() already has a local `threw` of its own.
+function errorFrom(fn) {
+  try { fn(); return null; } catch (err) { return err.message; }
+}
+
+// Stripe, as far as the report is concerned: the promotion code list and the
+// checkout sessions, and nothing else answers.
+function stripeStub({ codes, sessions }) {
+  return async (url) => {
+    const path = new URL(url).pathname;
+    const data = path === '/v1/promotion_codes' ? codes
+      : path === '/v1/checkout/sessions' ? sessions
+        : null;
+    if (!data) throw new Error(`test stub asked for an unexpected path: ${path}`);
+    return { ok: true, json: async () => ({ data, has_more: false }) };
+  };
+}
+
+// Runs the real main() end to end against that stub and hands back what it
+// printed. Checking the numbers the report actually prints is the point -
+// resolving the rate correctly and then printing owed from the old single
+// rate would pass any test that only looked at the map.
+async function runReport(argv, fixture) {
+  const out = [], warn = [];
+  const realLog = console.log, realWarn = console.warn;
+  console.log = (...a) => out.push(a.join(' '));
+  console.warn = (...a) => warn.push(a.join(' '));
+  try {
+    await runMain({ argv, fetch: stripeStub(fixture), key: 'sk_test' });
+  } finally {
+    console.log = realLog;
+    console.warn = realWarn;
+  }
+  return { out, warn };
+}
+
+// JERRELL is on 25%, OWEN10 is on the default. $40 of paid sales each, plus a
+// completed-but-unpaid $99 order on JERRELL that must not be worth a cent.
+const FIXTURE = {
+  codes: [
+    { id: 'promo_j', code: 'JERRELL', active: true, coupon: { id: 'co_1', name: 'Partner' } },
+    { id: 'promo_o', code: 'OWEN10', active: true, coupon: { id: 'co_2', name: 'Launch' } }
+  ],
+  sessions: [
+    paid({ ...withCode('promo_j'), amount_total: 2000, amount_subtotal: 2500 }),
+    paid({ ...withCode('promo_j'), amount_total: 2000, amount_subtotal: 2500 }),
+    paid({ ...withCode('promo_o'), amount_total: 4000, amount_subtotal: 5000 }),
+    { payment_status: 'unpaid', amount_total: 9900, amount_subtotal: 9900, ...withCode('promo_j') }
+  ]
+};
+
+function csvRow(lines, code) {
+  return (lines.find((l) => l.startsWith(code + ',')) || '').split(',');
+}
 
 async function main() {
   console.log('\nFinding the promotion code on a session');
@@ -130,6 +190,79 @@ async function main() {
   check('a newline is quoted too', csvCell('two\nlines'), '"two\nlines"');
   check('an ordinary name is left alone', csvCell('Launch week'), 'Launch week');
   check('nothing becomes an empty cell', csvCell(null), '');
+
+  console.log('\nReading --rates');
+
+  check('a pair becomes a rate', [...parseRates('JERRELL=25')], [['JERRELL', 25]]);
+  check('several pairs', [...parseRates('JERRELL=25,OWEN10=15')], [['JERRELL', 25], ['OWEN10', 15]]);
+  check('typed in lowercase, stored the way codes are matched',
+    [...parseRates('jerrell=25')], [['JERRELL', 25]]);
+  check('spaces around the pairs are forgiven',
+    [...parseRates(' JERRELL = 25 , OWEN10=15 ')], [['JERRELL', 25], ['OWEN10', 15]]);
+  check('a fraction of a percent survives', parseRates('OWEN10=12.5').get('OWEN10'), 12.5);
+  check('0 is a real answer, not a missing one', parseRates('FREEBIE=0').get('FREEBIE'), 0);
+  check('no flag at all means no overrides', parseRates(undefined).size, 0);
+  check('an empty string means no overrides', parseRates('   ').size, 0);
+
+  check('a pair with no = is rejected',
+    /not one/.test(errorFrom(() => parseRates('JERRELL25')) || ''), true);
+  check('a pair with no code is rejected',
+    /not one/.test(errorFrom(() => parseRates('=25')) || ''), true);
+  check('and the error quotes the pair it could not read',
+    /"JERRELL25"/.test(errorFrom(() => parseRates('JERRELL25')) || ''), true);
+  // parseFloat('25%') is 25, which is how a typo becomes a payment.
+  check('a rate that is not a number is rejected, not half-read',
+    /is not a number/.test(errorFrom(() => parseRates('JERRELL=25%')) || ''), true);
+  check('over 100 is rejected',
+    /between 0 and 100/.test(errorFrom(() => parseRates('JERRELL=125')) || ''), true);
+  check('negative is rejected',
+    /between 0 and 100/.test(errorFrom(() => parseRates('JERRELL=-5')) || ''), true);
+  check('the same code twice is rejected rather than last-one-wins',
+    /more than once/.test(errorFrom(() => parseRates('JERRELL=25,JERRELL=30')) || ''), true);
+  check('and case does not sneak a duplicate past it',
+    /more than once/.test(errorFrom(() => parseRates('JERRELL=25,jerrell=30')) || ''), true);
+
+  console.log('\nPaying two different people two different percentages');
+
+  const { out: csv } = await runReport(['--csv', '--rates', 'jerrell=25'], FIXTURE);
+  check('the CSV header carries the rate before owed',
+    csv[0], 'code,coupon,active,sales,customers_paid,rate_percent,owed');
+  // $40 at 25% is $10. At the old single rate it would print $8.00 and look
+  // exactly as correct as this does.
+  check('lowercase jerrell=25 matched JERRELL, and $40 owes $10',
+    csvRow(csv, 'JERRELL').slice(3), ['2', '40.00', '25', '10.00']);
+  check('the code nobody named is untouched at 20%: $40 owes $8',
+    csvRow(csv, 'OWEN10').slice(3), ['1', '40.00', '20', '8.00']);
+  check('the unpaid $99 order is still worth nothing to anybody',
+    csvRow(csv, 'JERRELL')[4], '40.00');
+  check('nothing is warned about when every named code exists', (await runReport(
+    ['--csv', '--rates', 'JERRELL=25'], FIXTURE)).warn.length, 0);
+
+  const { out: table } = await runReport(['--rates', 'JERRELL=25'], FIXTURE);
+  check('the table has a rate column',
+    /CODE\s+SALES\s+CUSTOMERS PAID\s+RATE\s+OWED\s+COUPON/.test(table[1]), true);
+  check('and the rate is printed on the row it applies to',
+    /^JERRELL\s+2\s+\$40\.00\s+25%\s+\$10\.00\s+Partner$/.test(
+      table.find((l) => l.startsWith('JERRELL')) || ''), true);
+  check('the total owed is the two different rates added up, not one rate',
+    /^TOTAL\s+3\s+\$80\.00\s+\$18\.00$/.test(
+      table.find((l) => l.startsWith('TOTAL')) || ''), true);
+
+  // JERREL=25 is a typo for JERRELL. Without the warning it matches nobody,
+  // Jerrell is quietly paid 20%, and the report looks identical to a correct
+  // run - which is the whole failure this flag was added to prevent.
+  const typo = await runReport(['--csv', '--rates', 'JERREL=25'], FIXTURE);
+  check('a --rates code that is not in Stripe is named in a warning',
+    typo.warn.some((l) => l.includes('JERREL') && /do not exist in Stripe/.test(l)), true);
+  check('and the warning stays out of the CSV',
+    typo.out.every((l) => !/WARNING/.test(l)), true);
+  check('meanwhile the typo really did leave Jerrell on the default rate',
+    csvRow(typo.out, 'JERRELL').slice(5), ['20', '8.00']);
+
+  check('a bad --rates stops the report instead of paying the default',
+    /between 0 and 100/.test(
+      (await runReport(['--rates', 'JERRELL=250'], FIXTURE).then(() => null, (e) => e.message)) || ''),
+    true);
 
   console.log(`\n${pass} passed, ${failures.length} failed`);
   if (failures.length) {
