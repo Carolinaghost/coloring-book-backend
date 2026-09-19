@@ -10,10 +10,15 @@
 //   node scripts/affiliate-report.js --days 30
 //   node scripts/affiliate-report.js --rate 25
 //   node scripts/affiliate-report.js --rates JERRELL=25,OWEN10=15
+//   node scripts/affiliate-report.js --period
 //   node scripts/affiliate-report.js --csv
 //
 // Options:
-//   --days <n>    how far back to look                   (default 7)
+//   --period      the pay week that just ended: Thursday 00:00 to Wednesday
+//                 23:59:59.999 local time. This is what the Thursday morning
+//                 run uses, and what the creators were promised.
+//   --tz <zone>   which local time --period means (default America/New_York)
+//   --days <n>    a rolling window ending now, for looking around (default 7)
 //   --rate <n>    commission, percent of what was PAID   (default 20)
 //   --rates <s>   per-code overrides, CODE=percent,...   (default none)
 //   --csv         machine-readable instead of a table
@@ -34,6 +39,16 @@
 // on anything large.
 
 const PAY_ON = 'paid';   // 'paid' or 'list'
+
+// Creators are told: paid every Friday, for everything that sold through the
+// Wednesday before. So the week being paid for is a fixed calendar block in
+// THEIR day, not a rolling seven days ending whenever the report happened to
+// be run. Those two are not the same, and the gap between them is a sale that
+// gets paid twice or never - a rolling window run at 08:00 Thursday misses
+// everything sold between 08:00 last Thursday and midnight, and pays again for
+// everything after 08:00 last Wednesday.
+const PAY_WEEK_STARTS_ON = 4;             // Thursday, with Sunday as 0
+const DEFAULT_TZ = 'America/New_York';
 
 const KEY = process.env.STRIPE_SECRET_KEY;
 const API = 'https://api.stripe.com/v1';
@@ -226,6 +241,69 @@ function tally(sessions, byId) {
 
 // deps is for the tests: a stubbed fetch and a fake key instead of real Stripe,
 // and an argv that is not the process's. Empty in normal use.
+
+// Everything below is about one hard thing: "midnight, local" is a different
+// instant in March than in November, and Stripe only speaks in UTC seconds.
+
+// The zone's offset from UTC at a given instant, in minutes. Read from the
+// formatter rather than computed, so the DST rules are the platform's problem.
+function offsetMinutes(at, tz) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'longOffset' })
+    .formatToParts(at);
+  const name = (parts.find((p) => p.type === 'timeZoneName') || {}).value || '';
+  const m = /GMT([+-])(\d{2}):(\d{2})/.exec(name);
+  if (!m) return 0;                       // "GMT" with no offset means UTC
+  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]));
+}
+
+// The calendar day and weekday it is in that zone right now.
+function localParts(at, tz) {
+  const f = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short'
+  }).formatToParts(at);
+  const get = (t) => (f.find((p) => p.type === t) || {}).value;
+  const days = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    year: Number(get('year')), month: Number(get('month')), day: Number(get('day')),
+    dow: days[get('weekday')]
+  };
+}
+
+// The instant that is midnight on a given local calendar day. Guess with the
+// offset that applies near it, then re-read the offset at the guess - the
+// second pass is what gets the two days a year when the first guess lands on
+// the wrong side of a clock change.
+function localMidnight({ year, month, day }, tz) {
+  const naive = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+  let at = naive - offsetMinutes(new Date(naive), tz) * 60000;
+  at = naive - offsetMinutes(new Date(at), tz) * 60000;
+  return at;
+}
+
+// The pay week that has finished: Thursday 00:00 up to, but not including, the
+// following Thursday 00:00 - which is Wednesday 23:59:59.999 as promised.
+// Run at 08:00 on Thursday, "the most recent Thursday midnight" is this
+// morning, so the week it closes is the one just gone.
+function payPeriod(now, tz) {
+  const here = localParts(now, tz);
+  const back = (here.dow - PAY_WEEK_STARTS_ON + 7) % 7;
+  const endDay = new Date(Date.UTC(here.year, here.month - 1, here.day) - back * 86400000);
+  const asParts = (d) => ({
+    year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate()
+  });
+  const end = localMidnight(asParts(endDay), tz);
+  const start = localMidnight(asParts(new Date(endDay.getTime() - 7 * 86400000)), tz);
+  return { start: Math.floor(start / 1000), end: Math.floor(end / 1000) };
+}
+
+// Wednesday, not the Thursday that the exclusive end lands on.
+function windowLabel(startSec, endSec, tz) {
+  const day = (sec) => new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, weekday: 'short', month: 'short', day: 'numeric'
+  }).format(new Date(sec * 1000));
+  return `${day(startSec)} 00:00 to ${day(endSec - 1000)} 23:59`;
+}
+
 async function main(deps = {}) {
   const key = deps.key || KEY;
   if (!key) throw new Error('STRIPE_SECRET_KEY is not set. Run this where the key lives.');
@@ -235,7 +313,16 @@ async function main(deps = {}) {
   const rate = args.rate !== undefined ? parseFloat(args.rate) : 20;
   if (!(rate >= 0 && rate <= 100)) throw new Error('--rate must be between 0 and 100.');
   const rates = parseRates(args.rates);
-  const since = Math.floor(Date.now() / 1000) - days * 86400;
+  const tz = args.tz && args.tz !== 'true' ? args.tz : DEFAULT_TZ;
+  const now = deps.now ? new Date(deps.now) : new Date();
+
+  // Two shapes of window. The pay period is the one anybody is paid from; the
+  // rolling one is for looking around and says so in the heading.
+  const usePeriod = args.period === 'true' || args.period === true;
+  const period = usePeriod ? payPeriod(now, tz) : null;
+  const since = usePeriod ? period.start
+    : Math.floor(now.getTime() / 1000) - days * 86400;
+  const until = usePeriod ? period.end : null;
 
   // Every code, including the ones nobody used - an influencer with zero sales
   // is a thing you want to see, not a row that quietly goes missing.
@@ -273,7 +360,11 @@ async function main(deps = {}) {
 
   // status=complete drops abandoned carts before they are paged over. It does
   // not decide what counts as a sale - payment_status does, in tally().
-  const sessions = await listAll('/checkout/sessions', { 'created[gte]': since, status: 'complete' }, io);
+  const sessionQuery = { 'created[gte]': since, status: 'complete' };
+  // Without this the report would sweep up sales made after the period closed
+  // and pay them twice - once now, once again next Thursday.
+  if (until) sessionQuery['created[lt]'] = until;
+  const sessions = await listAll('/checkout/sessions', sessionQuery, io);
 
   // Selling in more than one currency would make these totals a sum of
   // different units, printed with one dollar sign. Refuse rather than mislead.
@@ -297,10 +388,12 @@ async function main(deps = {}) {
     return;
   }
 
-  const from = new Date(since * 1000).toISOString().slice(0, 10);
-  const to = new Date().toISOString().slice(0, 10);
   const overrides = rows.filter((r) => r.rate !== rate).length;
-  console.log(`\nAffiliate report  ${from} to ${to}  (${days} days, ${rate}% of what customers paid`
+  const heading = usePeriod
+    ? `Pay week  ${windowLabel(since, until, tz)}  ${tz}`
+    : `Affiliate report  ${new Date(since * 1000).toISOString().slice(0, 10)} to `
+      + `${now.toISOString().slice(0, 10)}  (${days} days, rolling - not a pay week)`;
+  console.log(`\n${heading}  (${rate}% of what customers paid`
     + (overrides ? `, ${overrides} code(s) on their own rate` : '') + ')\n');
   console.log('CODE              SALES   CUSTOMERS PAID   RATE      OWED   COUPON');
   console.log('-'.repeat(78));
@@ -338,4 +431,4 @@ if (require.main === module) {
   main().catch((err) => { console.error('\nFailed:', err.message); process.exit(1); });
 }
 
-module.exports = { promoIdFromSession, attribute, tally, listAll, csvCell, parseArgs, parseRates, couponNames, main };
+module.exports = { promoIdFromSession, attribute, tally, listAll, csvCell, parseArgs, parseRates, couponNames, payPeriod, windowLabel, main };
