@@ -176,6 +176,13 @@ async function main() {
     check('to the address they gave', sent[0].to, 'jerrell@example.com');
     check('with the code in it', sent[0].text.includes('JERRELLCRUMP'), true);
     check('and the link in it', sent[0].text.includes('?c=jerrellcrump'), true);
+    // The pay week and the pay day are two different things and the proposal,
+    // the creator page and this email all have to agree on both. The week
+    // closes Wednesday night; the money moves the Friday after.
+    check('it names the pay day, which is Friday',
+      /paid the Friday after it closes/.test(sent[0].text), true);
+    check('and does not promise Thursday, which is only when the report runs',
+      /paid[^.]*Thursday/.test(sent[0].text), false);
     // Bank details by email is the thing this whole design avoids. If that
     // sentence ever disappears, somebody will send a routing number back.
     check('and it tells them not to email bank details',
