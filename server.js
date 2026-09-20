@@ -63,7 +63,13 @@ const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 7
 const IMAGES_PER_MIN = parseInt(process.env.OPENAI_IMAGES_PER_MIN, 10) || 45;
 // Free previews cost us real money and no one has paid yet, so they get a
 // ceiling: per visitor, and across the whole site.
+// Per visitor, per DAY - not per hour. An hourly window that rolls forever is
+// not a limit, it is a queue: wait sixty minutes and take eight more, all day,
+// for as long as you like. Nobody can steal a book that way (only scenes 1 and
+// 2 are ever free) but every one of those is an image we pay OpenAI to draw.
 const FREE_PREVIEWS_PER_IP = parseInt(process.env.FREE_PREVIEWS_PER_IP, 10) || 8;
+// Whose midnight the day ends at. The customer's, not the server's.
+const PREVIEW_DAY_TZ = process.env.PREVIEW_DAY_TZ || 'America/New_York';
 const FREE_PREVIEWS_PER_HOUR = parseInt(process.env.FREE_PREVIEWS_PER_HOUR, 10) || 240;
 // Where customers are sent back to after paying, and where the emailed link to
 // a finished book points. Render sets SITE_URL; this default only matters if it
@@ -1421,37 +1427,49 @@ app.get('/story-length', (req, res) => {
 // visitor -> timestamps inside a rolling hour, plus a site-wide count. It
 // resets when the process does, which is fine - it exists to blunt a spike and
 // to stop one person looping the free endpoint, not to bill anyone.
-const previewHits = new Map();
+// The site-wide guard stays in memory and stays hourly, because it is a
+// different job: it blunts a spike, and a spike is an hourly-shaped thing. It
+// is also the one that must never outlive a restart - if a burst knocked the
+// site into its cap, a redeploy should clear it, not carry it to midnight.
 let sitePreviewWindow = { start: Date.now(), count: 0 };
 
-function takeFreePreview(ip) {
+// Which day it is where the visitor is. en-CA gives YYYY-MM-DD, which is what
+// a DATE column wants.
+function previewDay(at = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: PREVIEW_DAY_TZ, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(at);
+}
+
+async function takeFreePreview(ip) {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
 
   if (now - sitePreviewWindow.start > hour) sitePreviewWindow = { start: now, count: 0 };
   if (sitePreviewWindow.count >= FREE_PREVIEWS_PER_HOUR) return 'site';
 
-  const seen = (previewHits.get(ip) || []).filter((t) => now - t < hour);
-  if (seen.length >= FREE_PREVIEWS_PER_IP) {
-    previewHits.set(ip, seen);
-    return 'visitor';
+  let quota;
+  try {
+    quota = await db.takePreviewQuota(ip, previewDay(), FREE_PREVIEWS_PER_IP);
+  } catch (err) {
+    // The database being unreachable must not stop a visitor seeing their own
+    // child drawn. Fail open, loudly: the site-wide hourly cap above is still
+    // standing, so the worst case is bounded rather than unlimited.
+    console.error('Could not count free previews, letting this one through -', err.message);
+    sitePreviewWindow.count++;
+    return null;
   }
+  if (!quota.allowed) return 'visitor';
 
-  seen.push(now);
-  previewHits.set(ip, seen);
   sitePreviewWindow.count++;
   return null;
 }
 
-// Drop visitors we have not seen in an hour so the Map cannot grow forever.
+// Yesterday's counters are dead weight. Once a day, quietly.
 setInterval(() => {
-  const cutoff = Date.now() - 60 * 60 * 1000;
-  for (const [ip, times] of previewHits) {
-    const live = times.filter((t) => t > cutoff);
-    if (live.length === 0) previewHits.delete(ip);
-    else previewHits.set(ip, live);
-  }
-}, 15 * 60 * 1000).unref();
+  db.purgeOldPreviewQuota().catch((err) =>
+    console.error('Could not tidy old preview counters:', err.message));
+}, 24 * 60 * 60 * 1000).unref();
 
 // photo: the single-subject book, unchanged. photos: a family book, one file per
 // person, in the same order as the people field that names them.
@@ -1497,10 +1515,10 @@ app.post('/convert', upload.fields([
     let previewOrder = null;
     if (sceneIndex < FREE_PREVIEW_PAGES) {
       // Nobody has paid for this one yet, so it has to be rationed.
-      const blocked = takeFreePreview(req.ip || 'unknown');
+      const blocked = await takeFreePreview(req.ip || 'unknown');
       if (blocked === 'visitor') {
         return res.status(429).json({
-          error: 'You have used up the free previews for now. Try again in an hour, or finish an order to get the whole book.'
+          error: 'You have used up today\'s free previews. Finish an order to get the whole book now.'
         });
       }
       if (blocked === 'site') {
@@ -1725,7 +1743,9 @@ function watchdogRuntime() {
     maxConcurrent: MAX_CONCURRENT_BOOKS,
     openAiErrors: openAiTroubleIn(WATCHDOG_MINUTES * 3),
     previewsThisHour: sitePreviewWindow.count,
-    previewLimitPerHour: FREE_PREVIEWS_PER_HOUR
+    previewLimitPerHour: FREE_PREVIEWS_PER_HOUR,
+    previewLimitPerVisitorPerDay: FREE_PREVIEWS_PER_IP,
+    previewDayTimeZone: PREVIEW_DAY_TZ
   };
 }
 
@@ -1944,5 +1964,5 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, previewDay, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
