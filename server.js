@@ -370,6 +370,12 @@ async function resolvePromotionCode(code) {
 const CREATOR_COUPON = process.env.CREATOR_COUPON || 'creatortrack';
 const CREATOR_RATE_PERCENT = parseInt(process.env.CREATOR_RATE_PERCENT, 10) || 25;
 const CREATOR_SIGNUPS_PER_IP = parseInt(process.env.CREATOR_SIGNUPS_PER_IP, 10) || 3;
+// The three mailboxes do three jobs and must not bleed into each other.
+// support@ belongs to customers - a parent whose book has not arrived. admin@
+// sets creators up. accounts@ is what they get paid. The welcome mail goes out
+// as admin@ so a creator's reply lands with creator setup and not in the queue
+// a worried parent is waiting in.
+const CREATOR_MAIL_FROM = process.env.CREATOR_MAIL_FROM || 'admin@crayonauts.com';
 
 // Stripe matches promotion codes exactly, and the site upper-cases whatever a
 // customer types, so a code has to be A-Z and digits with nothing else in it.
@@ -528,7 +534,10 @@ app.post('/creators', async (req, res) => {
   }
   try {
     const mail = mailer.creatorWelcomeEmail({ name, code, siteUrl: SITE_URL, ratePercent: CREATOR_RATE_PERCENT });
-    await mailer.sendMail({ to: email, subject: mail.subject, text: mail.text, html: mail.html });
+    await mailer.sendMail({
+      to: email, subject: mail.subject, text: mail.text, html: mail.html,
+      from: CREATOR_MAIL_FROM, replyTo: CREATOR_MAIL_FROM
+    });
     await db.markCreatorWelcomed(creator.id);
     console.log('Creator ' + code + ' signed up and welcomed.');
   } catch (err) {

@@ -177,6 +177,13 @@ async function main() {
     // sentence ever disappears, somebody will send a routing number back.
     check('and it tells them not to email bank details',
       /do not send\s*\n?\s*either of those by email/.test(sent[0].text), true);
+    // The three mailboxes do three jobs. A creator's welcome arriving from
+    // support@ means their reply joins the queue of parents chasing a book.
+    check('it comes from the creator-setup mailbox, not customer support',
+      sent[0].from, 'admin@crayonauts.com');
+    check('and replies go to the same place', sent[0].replyTo, 'admin@crayonauts.com');
+    check('and it names the mailbox that handles what they are owed',
+      sent[0].text.includes('accounts@crayonauts.com'), true);
 
     console.log('\nThe same person, twice');
     const again = await signUp(port, {
@@ -220,7 +227,22 @@ async function main() {
     check('and they are told where to go instead',
       /support@crayonauts\.com/.test(fourth.body.error), true);
 
-    console.log('\nWhat Jonathan can see');
+      console.log('\nThe customer mailbox is left alone');
+    // Changing where creator mail comes from must not move customer mail with
+    // it. A parent chasing a book replies to support@, and always has.
+    process.env.MAIL_FROM = 'support@crayonauts.com';
+    delete require.cache[require.resolve('../mailer.js')];
+    const freshMailer = require('../mailer.js');
+    const customer = freshMailer.buildMessage({
+      to: 'parent@example.com', subject: 'Your coloring book is ready',
+      text: 'x', html: '<p>x</p>'
+    });
+    check('an order email still comes from support@',
+      /^From: Crayonauts <support@crayonauts\.com>$/m.test(customer), true);
+    check('and its replies go there too',
+      /^Reply-To: support@crayonauts\.com$/m.test(customer), true);
+
+  console.log('\nWhat Jonathan can see');
     const listed = await db.listCreators();
     check('every creator who got a code is listed', listed.length, 3);
     check('and the list records whether the welcome went',
