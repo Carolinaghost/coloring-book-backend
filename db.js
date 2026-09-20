@@ -340,12 +340,29 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+// What Stripe actually charged, which is not always what we quoted. A 100% off
+// promotion code settles at zero, and zero is a number we have to keep rather
+// than a value we can treat as "not told" - `amountCents || null` read a free
+// book as no answer, fell through to COALESCE, and left the order carrying the
+// full price attachCheckoutSession wrote when checkout began. Every free code
+// then showed up in /stats revenue and in the admin CSV as a real sale.
+// Undefined and null still mean "no answer"; 0 means zero.
+function amountOrNull(amountCents) {
+  // Number(null) is 0, so "no answer" has to be spotted before the conversion
+  // rather than after it.
+  if (amountCents === null || amountCents === undefined || amountCents === '') return null;
+  const n = Number(amountCents);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function markPaid(sessionId, amountCents) {
+  const amount = amountOrNull(amountCents);
   if (!usingPostgres) {
     const o = memoryOrders.find((x) => x.stripeSessionId === sessionId);
     if (!o) return null;
     o.paid = true;
     o.status = 'in_progress';
+    if (amount !== null) o.amountCents = amount;
     return o;
   }
   const { rows } = await pool.query(
@@ -354,7 +371,7 @@ async function markPaid(sessionId, amountCents) {
             status = CASE WHEN status = 'new' THEN 'in_progress' ELSE status END
       WHERE stripe_session_id = $1
       RETURNING *`,
-    [sessionId, amountCents || null]
+    [sessionId, amount]
   );
   return rows[0] ? rowToOrder(rows[0]) : null;
 }

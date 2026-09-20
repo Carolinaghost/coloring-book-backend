@@ -132,6 +132,17 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
   try {
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object;
+      // A 100% off influencer code settles the session at zero, and Stripe
+      // shapes a no-cost order differently from a paid one: amount_total is 0,
+      // payment_intent is null because no money moved and no PaymentIntent was
+      // ever created, and payment_status reads 'no_payment_required' rather
+      // than 'paid'. checkout.session.completed is the only event a free order
+      // ever sends - there are no PaymentIntent events to fall back on - so
+      // fulfilment has to hang off this event and must not start insisting on
+      // a payment_intent or on payment_status === 'paid'. Either would hand
+      // out codes that take the money to zero and then quietly deliver
+      // nothing. test/free-code.test.js plays a real free order through this
+      // handler and fails if that protection is lost.
       const order = await db.markPaid(session.id, session.amount_total);
       console.log(order ? `Order ${order.id} marked paid.` : `No order for session ${session.id}.`);
       // Somebody has paid. Whatever the pollers were doing, do it now.
