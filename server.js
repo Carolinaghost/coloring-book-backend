@@ -11,6 +11,7 @@ const mailer = require('./mailer');
 const mirrorGuard = require('./mirror-guard');
 const { buildBookPdf, pdfFileName } = require('./pdf');
 const watchdog = require('./watchdog');
+const { main: affiliateReport } = require('./scripts/affiliate-report.js');
 const neon = require('./neon');
 const textGuard = require('./text-guard');
 
@@ -2114,6 +2115,105 @@ async function sendAlert({ level, subject, lines }) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// The Thursday payout report, emailed.
+//
+// This used to be a scheduled task on Jonathan's computer, because that is
+// where the Stripe key lives. Which meant the report only ran if the laptop
+// happened to be awake at 8am on a Thursday - and he drives a truck. A
+// payout report that silently does not run on the morning people are owed
+// money is worse than no report, because nothing tells you it did not run.
+//
+// Render has the Stripe key and is awake anyway, so it does it here and mails
+// the result. Nothing has to be switched on, nobody has to be home, and he
+// reads it on his phone.
+const PAYOUT_REPORT_TZ = process.env.PAYOUT_REPORT_TZ || 'America/New_York';
+const PAYOUT_REPORT_HOUR = parseInt(process.env.PAYOUT_REPORT_HOUR, 10) || 8;
+// Thursday, with Sunday as 0 - the morning after the pay week closes.
+const PAYOUT_REPORT_DOW = 4;
+// Jerrell negotiated 25 and is the only exception. Anyone else is on the
+// CREATOR_RATE_PERCENT default, which the sign-up form also writes into each
+// code's metadata. Kept as an env var so a second exception does not need a
+// deploy.
+const PAYOUT_REPORT_RATES = process.env.PAYOUT_REPORT_RATES || 'JERRELL=25';
+
+// What day and hour it is where the creators were promised their week runs.
+function localNow(at, tz) {
+  const f = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', hour12: false, weekday: 'short'
+  }).formatToParts(at);
+  const get = (t) => (f.find((p) => p.type === t) || {}).value;
+  const days = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    date: `${get('year')}-${get('month')}-${get('day')}`,
+    hour: Number(get('hour')) % 24,
+    dow: days[get('weekday')]
+  };
+}
+
+async function runPayoutReport(at = new Date()) {
+  const lines = [];
+  const warnings = [];
+  await affiliateReport({
+    argv: ['--period', '--tz', PAYOUT_REPORT_TZ, '--rates', PAYOUT_REPORT_RATES],
+    key: STRIPE_SECRET_KEY,
+    now: at,
+    print: (...a) => lines.push(a.join(' ')),
+    warn: (...a) => warnings.push(a.join(' '))
+  });
+  return { lines, warnings };
+}
+
+// Checked hourly rather than scheduled to the minute, so a redeploy cannot
+// land on the one minute it would have fired in and skip the week.
+async function maybeSendPayoutReport(at = new Date()) {
+  const here = localNow(at, PAYOUT_REPORT_TZ);
+  if (here.dow !== PAYOUT_REPORT_DOW || here.hour !== PAYOUT_REPORT_HOUR) return 'not now';
+  if (!STRIPE_SECRET_KEY) { console.error('Payout report: no Stripe key.'); return 'no key'; }
+
+  // Claimed before the work, not after. If Stripe is slow and the hourly timer
+  // comes round again, the second run finds the row already there and stops
+  // rather than sending a second, different-looking total.
+  let claimed = false;
+  try {
+    claimed = await db.claimJobRun('payout-report', here.date);
+  } catch (err) {
+    console.error('Payout report: could not claim the run -', err.message);
+    return 'claim failed';
+  }
+  if (!claimed) return 'already sent';
+
+  let report;
+  try {
+    report = await runPayoutReport(at);
+  } catch (err) {
+    // Loud, and to the same inbox. A payout report that failed is itself the
+    // thing he needs to know on a Thursday morning.
+    console.error('Payout report failed:', err.message);
+    await sendAlert({
+      level: 'WARN',
+      subject: 'Payout report did not run',
+      lines: ['The weekly creator payout report could not be produced.',
+        err.message,
+        'Nobody has been paid off this. Run it by hand before paying anyone:',
+        'node scripts/affiliate-report.js --period --rates ' + PAYOUT_REPORT_RATES]
+    }).catch(() => {});
+    return 'failed';
+  }
+
+  const body = report.warnings.length
+    ? report.warnings.join('\n') + '\n' + report.lines.join('\n')
+    : report.lines.join('\n');
+  await sendAlert({
+    level: 'PAYOUT',
+    subject: 'Creator payouts - pay these today',
+    lines: [body.trim()]
+  });
+  console.log('Payout report emailed for ' + here.date);
+  return 'sent';
+}
+
 // The only two things it is allowed to do on its own.
 async function rekickOrder(orderId) {
   if (rendering.has(String(orderId))) throw new Error('already rendering');
@@ -2174,6 +2274,17 @@ if (process.env.NODE_ENV !== 'test') {
       await watchdog.dailyDigest(watchdogContext());
     } catch (err) {
       console.error('Watchdog digest failed:', err.message);
+    }
+  }, 60 * 60 * 1000).unref();
+
+  // Its own hourly timer, and deliberately not folded into the one above: the
+  // digest returns early on 23 hours out of 24, and hanging the payout report
+  // off that would mean one missed digest takes the payout report with it.
+  setInterval(async () => {
+    try {
+      await maybeSendPayoutReport();
+    } catch (err) {
+      console.error('Payout report check failed:', err.message);
     }
   }, 60 * 60 * 1000).unref();
 }
@@ -2312,5 +2423,5 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, previewDay, clientIp, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };

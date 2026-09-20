@@ -304,7 +304,14 @@ function windowLabel(startSec, endSec, tz) {
   return `${day(startSec)} 00:00 to ${day(endSec - 1000)} 23:59`;
 }
 
+// `print` and `warn` are how the backend borrows this. The Thursday email runs
+// the very same function the command line does and collects the lines instead
+// of printing them - so what lands in Jonathan's inbox cannot drift from what
+// he sees when he runs it himself, which is the only way two versions of a
+// payout number ever stay in agreement.
 async function main(deps = {}) {
+  const print = deps.print || console.log;
+  const warn = deps.warn || console.warn;
   const key = deps.key || KEY;
   if (!key) throw new Error('STRIPE_SECRET_KEY is not set. Run this where the key lives.');
   const io = { fetch: deps.fetch, key };
@@ -358,9 +365,9 @@ async function main(deps = {}) {
   const known = new Set(codes.map((c) => String(c.code || '').toUpperCase()));
   const unmatched = [...rates.keys()].filter((c) => !known.has(c));
   if (unmatched.length) {
-    console.warn(`WARNING: --rates names ${unmatched.length} code(s) that do not exist in Stripe: `
+    warn(`WARNING: --rates names ${unmatched.length} code(s) that do not exist in Stripe: `
       + `${unmatched.join(', ')}.`);
-    console.warn('Check the spelling - anyone not matched is being paid the default '
+    warn('Check the spelling - anyone not matched is being paid the default '
       + `rate of ${rate}%.`);
   }
 
@@ -415,9 +422,9 @@ async function main(deps = {}) {
     .sort((a, b) => b.owed - a.owed || a.code.localeCompare(b.code));
 
   if (args.csv) {
-    console.log('code,coupon,active,sales,customers_paid,rate_percent,owed,'
+    print('code,coupon,active,sales,customers_paid,rate_percent,owed,'
       + 'first_sale,creator_name,creator_email');
-    rows.forEach((r) => console.log([r.code, r.coupon, r.active, r.sales,
+    rows.forEach((r) => print([r.code, r.coupon, r.active, r.sales,
       (r.paid / 100).toFixed(2), r.rate, (r.owed / 100).toFixed(2),
       r.firstSale ? 'yes' : 'no', r.creatorName, r.creatorEmail].map(csvCell).join(',')));
     return;
@@ -428,7 +435,7 @@ async function main(deps = {}) {
     ? `Pay week  ${windowLabel(since, until, tz)}  ${tz}`
     : `Affiliate report  ${new Date(since * 1000).toISOString().slice(0, 10)} to `
       + `${now.toISOString().slice(0, 10)}  (${days} days, rolling - not a pay week)`;
-  console.log(`\n${heading}  (${rate}% of what customers paid`
+  print(`\n${heading}  (${rate}% of what customers paid`
     + (overrides ? `, ${overrides} code(s) on their own rate` : '') + ')\n');
   // A live code with no sales is news - somebody is not posting. A DEAD code
   // with no sales is just history, and after a few rounds of testing there is
@@ -437,13 +444,13 @@ async function main(deps = {}) {
   const retired = rows.filter((r) => !r.active && r.sales === 0);
   const shown = rows.filter((r) => r.active || r.sales > 0);
 
-  console.log('CODE              SALES   CUSTOMERS PAID   RATE      OWED   COUPON');
-  console.log('-'.repeat(78));
+  print('CODE              SALES   CUSTOMERS PAID   RATE      OWED   COUPON');
+  print('-'.repeat(78));
   let totalSales = 0, totalPaid = 0, totalOwed = 0;
   for (const r of shown) {
     totalSales += r.sales; totalPaid += r.paid; totalOwed += r.owed;
     const flag = r.active ? '' : '  (inactive)';
-    console.log(
+    print(
       r.code.padEnd(18) +
       String(r.sales).padStart(5) +
       money(r.paid).padStart(16) +
@@ -452,40 +459,40 @@ async function main(deps = {}) {
       '   ' + r.coupon + flag
     );
   }
-  console.log('-'.repeat(78));
+  print('-'.repeat(78));
   // No rate on the total line: with two rates in the table, one number there
   // would be a third rate that nobody is actually paid.
-  console.log('TOTAL'.padEnd(18) + String(totalSales).padStart(5) + money(totalPaid).padStart(16)
+  print('TOTAL'.padEnd(18) + String(totalSales).padStart(5) + money(totalPaid).padStart(16)
     + ''.padStart(7) + money(totalOwed).padStart(10));
   if (retired.length) {
-    console.log(`\n${retired.length} deactivated code(s) with no sales are not listed: `
+    print(`\n${retired.length} deactivated code(s) with no sales are not listed: `
       + retired.map((r) => r.code).join(', '));
   }
   if (unattributed) {
-    console.log(`\n${unattributed} paid order(s) used no code - ${money(unattributedPaid)}. Those are yours, nobody is owed.`);
+    print(`\n${unattributed} paid order(s) used no code - ${money(unattributedPaid)}. Those are yours, nobody is owed.`);
   }
   if (unknown.size) {
-    console.log(`\nWARNING: ${unknown.size} code(s) were used that are not in your promotion code list.`);
-    console.log('Somebody earned these and is not being paid for them. Deleted from the dashboard?');
-    for (const [id, seen] of unknown) console.log(`  ${id}  ${seen.sales} sale(s)  ${money(seen.paid)}`);
+    print(`\nWARNING: ${unknown.size} code(s) were used that are not in your promotion code list.`);
+    print('Somebody earned these and is not being paid for them. Deleted from the dashboard?');
+    for (const [id, seen] of unknown) print(`  ${id}  ${seen.sales} sale(s)  ${money(seen.paid)}`);
   }
   // Printed last, under the money, because it is the only thing in this report
   // that asks Jonathan to go and do something.
   const newcomers = rows.filter((r) => r.firstSale);
   if (newcomers.length) {
-    console.log(`\n${newcomers.length} code(s) earned for the FIRST time this week.`);
-    console.log('Set each of these up as a contractor in QuickBooks before paying them:');
-    console.log('QuickBooks > Payroll > Contractors > Add a contractor. They fill in their');
-    console.log('own W-9 and bank details - you never handle either.\n');
+    print(`\n${newcomers.length} code(s) earned for the FIRST time this week.`);
+    print('Set each of these up as a contractor in QuickBooks before paying them:');
+    print('QuickBooks > Payroll > Contractors > Add a contractor. They fill in their');
+    print('own W-9 and bank details - you never handle either.\n');
     for (const r of newcomers) {
       const who = r.creatorEmail
         ? `${r.creatorName || r.code} <${r.creatorEmail}>`
         : 'no name or email on this code - it was made by hand, so find them yourself';
-      console.log(`  ${r.code.padEnd(18)} ${money(r.owed).padStart(9)}   ${who}`);
+      print(`  ${r.code.padEnd(18)} ${money(r.owed).padStart(9)}   ${who}`);
     }
   }
-  if (!totalSales) console.log('\nNo code was used in this window.');
-  console.log('');
+  if (!totalSales) print('\nNo code was used in this window.');
+  print('');
 }
 
 if (require.main === module) {
