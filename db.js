@@ -16,6 +16,7 @@ const usingPostgres = Boolean(DATABASE_URL);
 
 let pool = null;
 let memoryOrders = [];
+const memoryPreviewQuota = new Map();
 let memoryEvents = [];
 let nextMemoryId = 1;
 let nextMemoryEventId = 1;
@@ -113,6 +114,13 @@ const CREATE_PAGES_SQL = `
 // visitor is not counted twice, and where they came from. Nothing here can be
 // traced back to a person, which is why it needs no cookie banner.
 const CREATE_EVENTS_SQL = `
+  CREATE TABLE IF NOT EXISTS preview_quota (
+    ip TEXT NOT NULL,
+    day DATE NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ip, day)
+  );
+
   CREATE TABLE IF NOT EXISTS events (
     id         BIGSERIAL   PRIMARY KEY,
     type       TEXT        NOT NULL,
@@ -332,12 +340,29 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+// What Stripe actually charged, which is not always what we quoted. A 100% off
+// promotion code settles at zero, and zero is a number we have to keep rather
+// than a value we can treat as "not told" - `amountCents || null` read a free
+// book as no answer, fell through to COALESCE, and left the order carrying the
+// full price attachCheckoutSession wrote when checkout began. Every free code
+// then showed up in /stats revenue and in the admin CSV as a real sale.
+// Undefined and null still mean "no answer"; 0 means zero.
+function amountOrNull(amountCents) {
+  // Number(null) is 0, so "no answer" has to be spotted before the conversion
+  // rather than after it.
+  if (amountCents === null || amountCents === undefined || amountCents === '') return null;
+  const n = Number(amountCents);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function markPaid(sessionId, amountCents) {
+  const amount = amountOrNull(amountCents);
   if (!usingPostgres) {
     const o = memoryOrders.find((x) => x.stripeSessionId === sessionId);
     if (!o) return null;
     o.paid = true;
     o.status = 'in_progress';
+    if (amount !== null) o.amountCents = amount;
     return o;
   }
   const { rows } = await pool.query(
@@ -346,7 +371,7 @@ async function markPaid(sessionId, amountCents) {
             status = CASE WHEN status = 'new' THEN 'in_progress' ELSE status END
       WHERE stripe_session_id = $1
       RETURNING *`,
-    [sessionId, amountCents || null]
+    [sessionId, amount]
   );
   return rows[0] ? rowToOrder(rows[0]) : null;
 }
@@ -958,11 +983,53 @@ async function purgeOldEvents(days) {
   return rowCount;
 }
 
+
+// Free previews, counted per visitor per day, and counted HERE rather than in
+// a Map in the web process. The Map version reset on every restart, and this
+// service redeploys whenever main moves - so a daily cap kept in memory is a
+// cap that quietly lifts itself several times a week.
+//
+// One statement, so two requests arriving together cannot both read "7 used"
+// and both be allowed. The WHERE is what enforces the limit: on the row that
+// is already at the limit the update matches nothing, nothing is returned, and
+// the caller is over.
+//
+// `day` is passed in rather than taken from now() so the boundary is the
+// customer's midnight, not the database server's.
+async function takePreviewQuota(ip, day, limit) {
+  if (!usingPostgres) {
+    const key = `${ip}|${day}`;
+    const used = (memoryPreviewQuota.get(key) || 0) + 1;
+    if (used > limit) return { allowed: false, used: limit };
+    memoryPreviewQuota.set(key, used);
+    return { allowed: true, used };
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO preview_quota (ip, day, used) VALUES ($1, $2, 1)
+       ON CONFLICT (ip, day) DO UPDATE SET used = preview_quota.used + 1
+       WHERE preview_quota.used < $3
+     RETURNING used`,
+    [ip, day, limit]
+  );
+  return rows.length ? { allowed: true, used: rows[0].used } : { allowed: false, used: limit };
+}
+
+// Yesterday's rows are of no further use. Kept for a few days only so a
+// question like "was that visitor throttled on Tuesday" can still be answered.
+async function purgeOldPreviewQuota(days = 7) {
+  if (!usingPostgres) { memoryPreviewQuota.clear(); return 0; }
+  const { rowCount } = await pool.query(
+    "DELETE FROM preview_quota WHERE day < CURRENT_DATE - ($1 || ' days')::interval", [days]);
+  return rowCount;
+}
+
 module.exports = {
   // Scripts that need raw SQL (scripts/reencode-pages.js) reach the pool here.
   // Null when running on the in-memory store, which those scripts check for.
   get pool() { return pool; },
   usingPostgres,
+  takePreviewQuota,
+  purgeOldPreviewQuota,
   status,
   initDb,
   saveOrder,

@@ -63,7 +63,13 @@ const MAX_CONCURRENT_BOOKS = parseInt(process.env.MAX_CONCURRENT_BOOKS, 10) || 7
 const IMAGES_PER_MIN = parseInt(process.env.OPENAI_IMAGES_PER_MIN, 10) || 45;
 // Free previews cost us real money and no one has paid yet, so they get a
 // ceiling: per visitor, and across the whole site.
+// Per visitor, per DAY - not per hour. An hourly window that rolls forever is
+// not a limit, it is a queue: wait sixty minutes and take eight more, all day,
+// for as long as you like. Nobody can steal a book that way (only scenes 1 and
+// 2 are ever free) but every one of those is an image we pay OpenAI to draw.
 const FREE_PREVIEWS_PER_IP = parseInt(process.env.FREE_PREVIEWS_PER_IP, 10) || 8;
+// Whose midnight the day ends at. The customer's, not the server's.
+const PREVIEW_DAY_TZ = process.env.PREVIEW_DAY_TZ || 'America/New_York';
 const FREE_PREVIEWS_PER_HOUR = parseInt(process.env.FREE_PREVIEWS_PER_HOUR, 10) || 240;
 // Where customers are sent back to after paying, and where the emailed link to
 // a finished book points. Render sets SITE_URL; this default only matters if it
@@ -126,6 +132,17 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
   try {
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object;
+      // A 100% off influencer code settles the session at zero, and Stripe
+      // shapes a no-cost order differently from a paid one: amount_total is 0,
+      // payment_intent is null because no money moved and no PaymentIntent was
+      // ever created, and payment_status reads 'no_payment_required' rather
+      // than 'paid'. checkout.session.completed is the only event a free order
+      // ever sends - there are no PaymentIntent events to fall back on - so
+      // fulfilment has to hang off this event and must not start insisting on
+      // a payment_intent or on payment_status === 'paid'. Either would hand
+      // out codes that take the money to zero and then quietly deliver
+      // nothing. test/free-code.test.js plays a real free order through this
+      // handler and fails if that protection is lost.
       const order = await db.markPaid(session.id, session.amount_total);
       console.log(order ? `Order ${order.id} marked paid.` : `No order for session ${session.id}.`);
       // Somebody has paid. Whatever the pollers were doing, do it now.
@@ -304,11 +321,44 @@ app.post('/orders/:id/status', async (req, res) => {
   }
 });
 
+// Turns the code from a creator's link ("JERRELL") into the promotion code id
+// Stripe wants on a session ("promo_1ABC..."). Returns null for anything it
+// cannot vouch for, which is the signal to fall back to the typing box.
+//
+// Deliberately forgiving about the code itself and unforgiving about the
+// answer: codes get typed into ad captions by hand, so case and stray spaces
+// are fixed here, but only an active code that came back from Stripe is used.
+// Stripe matches `code` exactly, so the upper-casing matters - codes are
+// created upper-case in the dashboard.
+async function resolvePromotionCode(code) {
+  const wanted = String(code || '').trim().toUpperCase();
+  if (!wanted || wanted.length > 64 || !/^[A-Z0-9_-]+$/.test(wanted)) return null;
+  if (!STRIPE_SECRET_KEY) return null;
+  try {
+    const url = new URL('https://api.stripe.com/v1/promotion_codes');
+    url.searchParams.set('code', wanted);
+    url.searchParams.set('active', 'true');
+    url.searchParams.set('limit', '1');
+    const resp = await fetch(url, { headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` } });
+    if (!resp.ok) return null;
+    const body = await resp.json();
+    const found = Array.isArray(body.data) ? body.data[0] : null;
+    // active is checked again rather than trusted from the query: a filter that
+    // silently stopped filtering would quietly start honouring dead codes.
+    return found && found.active && found.id ? found.id : null;
+  } catch (err) {
+    // A creator losing attribution is bad. A checkout that will not open
+    // because Stripe was slow answering a side question is worse.
+    console.error('Could not resolve promotion code:', err.message);
+    return null;
+  }
+}
+
 // Creates a Stripe Checkout Session for an order and returns the URL to send
 // the customer to. Called with the order id and the access token we handed the
 // browser when the order was created.
 app.post('/checkout', async (req, res) => {
-  const { orderId, token, product } = req.body || {};
+  const { orderId, token, product, code } = req.body || {};
   if (!STRIPE_SECRET_KEY) {
     return res.status(500).json({ error: 'Payments are not configured on the server.' });
   }
@@ -340,16 +390,32 @@ app.post('/checkout', async (req, res) => {
       `${order.pageCount || 15} pages starring ${order.childName}`);
     if (isPrint) form.append('shipping_address_collection[allowed_countries][0]', 'US');
 
-    // Influencer codes. Stripe hosts the box, the codes live in the Stripe
-    // dashboard one per influencer, and the code someone types IS the
-    // attribution - Stripe reports sales per promotion code, so there is no
-    // affiliate software to run.
+    // Creator codes. The codes live in the Stripe dashboard, one per creator,
+    // and the code on the session IS the attribution - Stripe reports sales per
+    // promotion code, so there is no affiliate software to run.
     //
-    // This has to be appended before the consent copy below is taken, or only
+    // There are two ways one gets onto a session, and they are mutually
+    // exclusive - Stripe rejects a session that sets both:
+    //
+    //   allow_promotion_codes  Stripe shows a box and the customer types it.
+    //   discounts[]            we attach it, and there is no box.
+    //
+    // A creator posting a link is the whole reason for the second one. A
+    // customer who followed jerrell's link has already "used" his code by
+    // clicking it; asking them to also type it loses most of the attribution,
+    // because most people will not.
+    //
+    // The lookup is what makes this safe to feed from a URL: an unknown,
+    // expired or deactivated code resolves to nothing and the customer simply
+    // gets the ordinary typing box. A bad link can cost a creator their
+    // commission, but it can never stop a sale.
+    //
+    // This has to be settled before the consent copy below is taken, or only
     // one of the two sessions carries it and the box disappears on whichever
-    // path was missed. Never add a discounts[] parameter alongside it: Stripe
-    // rejects a session that sets both.
-    form.append('allow_promotion_codes', 'true');
+    // path was missed.
+    const promoId = await resolvePromotionCode(code);
+    if (promoId) form.append('discounts[0][promotion_code]', promoId);
+    else form.append('allow_promotion_codes', 'true');
 
     // Make the customer tick a box agreeing to immediate delivery before paying.
     // Stripe records the acceptance against the payment, which is the evidence
@@ -632,7 +698,18 @@ if (!CAN_CALL_OPENAI) {
 // few days of stubble came back with a chin of hundreds of tiny dots - already
 // grey, nothing left for a child to colour - while the hair on his head obeyed
 // the rule perfectly.
-const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands, well separated, with plenty of white showing between them - never fill hair with solid black, dense scribbles, crosshatching, stippling, any field of small dots, or a dense curtain of many fine parallel strands, no matter how dark or curly the hair is in the photo. Draw a beard, moustache or stubble the same way: one clean outline around the shape of it and open white inside, never speckles, flecks or shaded texture, however short the hair is. Every part of the drawing must be left white so a child can color it in.';
+// Trademark and copyright. A child's photo very often carries somebody else's
+// property on it - a swoosh, a team crest, a cartoon character on a pyjama top -
+// and drawing it reproduces that mark in something being sold. The text ban
+// above does not cover this: a logo is a picture, not a word, and it walks
+// straight past a rule about letters. It also walks past the OCR word check,
+// which reads lettering and is blind to artwork by design.
+//
+// So prevention is the only control there is here, and it has to name the
+// categories rather than gesture at them - the stippling lesson, again: a ban
+// only stops what it can name.
+
+const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands, well separated, with plenty of white showing between them - never fill hair with solid black, dense scribbles, crosshatching, stippling, any field of small dots, or a dense curtain of many fine parallel strands, no matter how dark or curly the hair is in the photo. Draw a beard, moustache or stubble the same way: one clean outline around the shape of it and open white inside, never speckles, flecks or shaded texture, however short the hair is. Never reproduce any logo, emblem, team crest, badge, brand mark, wordmark, slogan, mascot, cartoon character or licensed artwork, even when one is clearly printed on clothing, a bag, a cap, a cup, a toy or anything else in the photo - draw that surface as plain blank fabric or plain blank material with nothing on it, keeping only the shape of the garment or object itself. Every part of the drawing must be left white so a child can color it in.';
 
 // BASE_STYLE fixes the look - bold outlines, no shading, no text, open hair -
 // but says nothing about how MUCH is in the picture. Left to itself the model
@@ -1308,7 +1385,7 @@ app.post('/event', async (req, res) => {
   // happens and the page never waits on it.
   res.status(204).end();
   try {
-    if (!takeEventSlot(req.ip || 'unknown')) return;
+    if (!takeEventSlot(clientIp(req))) return;
     // 'paid' is recorded by the Stripe webhook alone. Accepting it here would
     // let anyone inflate the only number that matters.
     if (req.body && req.body.type === 'paid') return;
@@ -1364,41 +1441,83 @@ app.get('/story-length', (req, res) => {
   res.json({ theme, sceneCount: scenes.length });
 });
 
+
+// Who the visitor actually is.
+//
+// There are two proxies in front of this app - Cloudflare, then Render's load
+// balancer - and `trust proxy` is set to 1, so Express peels off one hop and
+// lands on the Cloudflare edge, not the person. Every visitor routed through
+// the same edge looks like one visitor.
+//
+// That does not matter for logging. It matters enormously for anything that
+// rations by visitor: a whole city shares one Cloudflare edge, so a per-visitor
+// daily allowance becomes a per-city daily allowance, and real customers get
+// turned away while the site looks fine.
+//
+// CF-Connecting-IP is set by Cloudflare itself and overwrites anything the
+// client sent, so it is the trustworthy one as long as traffic arrives through
+// Cloudflare. X-Forwarded-For is the fallback, leftmost entry being the
+// original client. Both can be forged by anyone who reaches the origin
+// directly, and that is accepted: the prize for forging is a few more free
+// previews, which is exactly what the old limiter gave away for nothing.
+function clientIp(req) {
+  const cf = req.headers['cf-connecting-ip'];
+  if (typeof cf === 'string' && cf.trim()) return cf.trim();
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd.trim()) {
+    const first = fwd.split(',')[0].trim();
+    if (first) return first;
+  }
+  return req.ip || 'unknown';
+}
+
 // A small rate limiter for free previews. No dependency, no store: a Map of
 // visitor -> timestamps inside a rolling hour, plus a site-wide count. It
 // resets when the process does, which is fine - it exists to blunt a spike and
 // to stop one person looping the free endpoint, not to bill anyone.
-const previewHits = new Map();
+// The site-wide guard stays in memory and stays hourly, because it is a
+// different job: it blunts a spike, and a spike is an hourly-shaped thing. It
+// is also the one that must never outlive a restart - if a burst knocked the
+// site into its cap, a redeploy should clear it, not carry it to midnight.
 let sitePreviewWindow = { start: Date.now(), count: 0 };
 
-function takeFreePreview(ip) {
+// Which day it is where the visitor is. en-CA gives YYYY-MM-DD, which is what
+// a DATE column wants.
+function previewDay(at = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: PREVIEW_DAY_TZ, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(at);
+}
+
+async function takeFreePreview(ip) {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
 
   if (now - sitePreviewWindow.start > hour) sitePreviewWindow = { start: now, count: 0 };
   if (sitePreviewWindow.count >= FREE_PREVIEWS_PER_HOUR) return 'site';
 
-  const seen = (previewHits.get(ip) || []).filter((t) => now - t < hour);
-  if (seen.length >= FREE_PREVIEWS_PER_IP) {
-    previewHits.set(ip, seen);
-    return 'visitor';
+  let quota;
+  try {
+    quota = await db.takePreviewQuota(ip, previewDay(), FREE_PREVIEWS_PER_IP);
+  } catch (err) {
+    // The database being unreachable must not stop a visitor seeing their own
+    // child drawn. Fail open, loudly: the site-wide hourly cap above is still
+    // standing, so the worst case is bounded rather than unlimited.
+    console.error('Could not count free previews, letting this one through -', err.message);
+    sitePreviewWindow.count++;
+    return null;
   }
+  if (!quota.allowed) return 'visitor';
 
-  seen.push(now);
-  previewHits.set(ip, seen);
   sitePreviewWindow.count++;
   return null;
 }
 
-// Drop visitors we have not seen in an hour so the Map cannot grow forever.
+// Yesterday's counters are dead weight. Once a day, quietly.
 setInterval(() => {
-  const cutoff = Date.now() - 60 * 60 * 1000;
-  for (const [ip, times] of previewHits) {
-    const live = times.filter((t) => t > cutoff);
-    if (live.length === 0) previewHits.delete(ip);
-    else previewHits.set(ip, live);
-  }
-}, 15 * 60 * 1000).unref();
+  db.purgeOldPreviewQuota().catch((err) =>
+    console.error('Could not tidy old preview counters:', err.message));
+}, 24 * 60 * 60 * 1000).unref();
 
 // photo: the single-subject book, unchanged. photos: a family book, one file per
 // person, in the same order as the people field that names them.
@@ -1444,10 +1563,10 @@ app.post('/convert', upload.fields([
     let previewOrder = null;
     if (sceneIndex < FREE_PREVIEW_PAGES) {
       // Nobody has paid for this one yet, so it has to be rationed.
-      const blocked = takeFreePreview(req.ip || 'unknown');
+      const blocked = await takeFreePreview(clientIp(req));
       if (blocked === 'visitor') {
         return res.status(429).json({
-          error: 'You have used up the free previews for now. Try again in an hour, or finish an order to get the whole book.'
+          error: 'You have used up today\'s free previews. Finish an order to get the whole book now.'
         });
       }
       if (blocked === 'site') {
@@ -1672,7 +1791,9 @@ function watchdogRuntime() {
     maxConcurrent: MAX_CONCURRENT_BOOKS,
     openAiErrors: openAiTroubleIn(WATCHDOG_MINUTES * 3),
     previewsThisHour: sitePreviewWindow.count,
-    previewLimitPerHour: FREE_PREVIEWS_PER_HOUR
+    previewLimitPerHour: FREE_PREVIEWS_PER_HOUR,
+    previewLimitPerVisitorPerDay: FREE_PREVIEWS_PER_IP,
+    previewDayTimeZone: PREVIEW_DAY_TZ
   };
 }
 
@@ -1891,5 +2012,5 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, previewDay, clientIp, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };

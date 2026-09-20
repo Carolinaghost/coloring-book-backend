@@ -141,6 +141,23 @@ async function main() {
   check('detailed adds strands but not density',
     /more strands, never a denser curtain/.test(DETAIL_LEVELS.detailed.prompt), true);
 
+  // Trademark. A logo is a picture, so the no-letters rule does not touch it,
+  // and neither does the OCR word check - that reads lettering and is blind to
+  // artwork. The prompt is the only control, so the prompt has to name the
+  // categories rather than gesture at them.
+  for (const named of ['logo', 'emblem', 'team crest', 'badge', 'brand mark',
+    'wordmark', 'slogan', 'mascot', 'cartoon character', 'licensed artwork']) {
+    check(`the style rule names ${named}`, BASE_STYLE.includes(named), true);
+  }
+  check('and says what to draw instead, rather than only what not to draw',
+    /plain blank fabric or plain blank material/.test(BASE_STYLE), true);
+  check('while keeping the garment itself',
+    /keeping only the shape of the garment or object itself/.test(BASE_STYLE), true);
+  // The ban has to survive the detail levels, not just sit in the base rule.
+  check('every detail level still carries the base rule with it',
+    Object.keys(DETAIL_LEVELS).every((k) =>
+      buildPrompt('Portrait', 0, 1, 'child', '', null, k).includes('team crest')), true);
+
   check('the word dots appears exactly once', (BASE_STYLE.match(/dots/g) || []).length, 1);
   check('and that once is the field, not dots on their own',
     /any field of small dots/.test(BASE_STYLE), true);

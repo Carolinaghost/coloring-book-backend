@@ -5,7 +5,7 @@
 //
 //   npm test
 //
-// Two things, both of which fail silently.
+// Three things, all of which fail silently.
 //
 // The promotion code box. Influencer codes are created in the Stripe dashboard
 // and the code someone types is the attribution, so if allow_promotion_codes
@@ -17,7 +17,13 @@
 // has no descriptor field in its dashboard, so the session is the only place
 // it can be set, and a charge nobody recognises is a chargeback.
 //
-// Both have to survive the fallbacks. /checkout tries the best session first
+// The creator link. A creator posts crayonauts.com/?c=THEIRCODE, and the code
+// rides through to the session as discounts[] so the customer never has to
+// type it. If that link stops attaching the code, every sale it makes still
+// goes through at full price and lands in the report as "nobody is owed" - the
+// creator is simply not paid, and nothing anywhere says so.
+//
+// All three have to survive the fallbacks. /checkout tries the best session first
 // and drops one refusable thing per rung - consent, then the descriptor - so a
 // Stripe account that refuses either still takes the money. Anything appended
 // to only one rung disappears on the others, which is why each rung is checked
@@ -65,9 +71,18 @@ function request(server, path, { method = 'GET', body } = {}) {
 // this pretend account will not accept, so each real-world case can be played
 // out: an account with no terms URL, a managed account that rejects
 // descriptors, and one that does both.
-function captureStripe(sent, refuse) {
+function captureStripe(sent, refuse, promos, lookups) {
   const realFetch = global.fetch;
   global.fetch = async (url, opts) => {
+    // The promotion code lookup is a GET to a different endpoint, and it is
+    // kept out of `sent` on purpose: `sent` means session attempts, and the
+    // counts asserted below are about the fallback ladder, not about this.
+    if (String(url).includes('/v1/promotion_codes')) {
+      const asked = new URL(String(url)).searchParams.get('code');
+      if (lookups) lookups.push(asked);
+      const hit = (promos || {})[asked];
+      return { ok: true, json: async () => ({ data: hit ? [hit] : [] }) };
+    }
     if (String(url).includes('api.stripe.com')) {
       const body = opts.body instanceof URLSearchParams ? opts.body.toString() : String(opts.body);
       const params = new URLSearchParams(body);
@@ -91,9 +106,11 @@ async function main() {
 
   // Every checkout in this file: place an order, pay for it, and hand back
   // every body Stripe was sent, in the order the ladder tried them.
-  async function checkout(refuse, orderFields) {
+  async function checkout(refuse, orderFields, extra) {
     const sent = [];
-    const restore = captureStripe(sent, refuse);
+    const lookups = [];
+    const { code, promos } = extra || {};
+    const restore = captureStripe(sent, refuse, promos, lookups);
     try {
       const made = JSON.parse((await request(server, '/orders', {
         method: 'POST',
@@ -103,9 +120,9 @@ async function main() {
       })).body);
       const res = await request(server, '/checkout', {
         method: 'POST',
-        body: JSON.stringify({ orderId: made.order.id, token: made.accessToken, product: 'digital' })
+        body: JSON.stringify({ orderId: made.order.id, token: made.accessToken, product: 'digital', code })
       });
-      return { res, sent, order: made.order, taken: sent[sent.length - 1] };
+      return { res, sent, lookups, order: made.order, taken: sent[sent.length - 1] };
     } finally {
       restore();
     }
@@ -216,6 +233,52 @@ async function main() {
     // characters. We cannot see the prefix, so leave it room.
     check('short enough to leave room for the account prefix',
       STATEMENT_DESCRIPTOR_SUFFIX.length <= 12, true);
+
+    console.log('\nA customer arriving from a creator link');
+
+    const LIVE = { JERRELL: { id: 'promo_live', active: true } };
+    const DEAD = { OLDGUY: { id: 'promo_dead', active: false } };
+
+    const viaLink = await checkout(null, null, { code: 'JERRELL', promos: LIVE });
+    check('the sale goes through', viaLink.res.status, 200);
+    check('the creator code is attached to the session',
+      viaLink.taken.get('discounts[0][promotion_code]'), 'promo_live');
+    // Both at once is the one thing Stripe refuses outright here, and it would
+    // only show up when a customer tried to pay.
+    check('and the typing box is not also asked for',
+      viaLink.taken.get('allow_promotion_codes'), null);
+    check('still one request to create the session', viaLink.sent.length, 1);
+
+    // The code arrives from a URL somebody typed into an ad caption.
+    const sloppy = await checkout(null, null, { code: ' jerrell ', promos: LIVE });
+    check('a lower-case, space-padded code still finds the creator',
+      sloppy.taken.get('discounts[0][promotion_code]'), 'promo_live');
+    check('and Stripe was asked for the tidied code', sloppy.lookups, ['JERRELL']);
+
+    // Everything below is a link that cannot pay anybody. None of them may cost
+    // the sale - the customer gets the ordinary box and buys the book.
+    for (const [label, bad] of [
+      ['an unknown code', { code: 'NOSUCHCODE', promos: LIVE }],
+      ['a deactivated code', { code: 'OLDGUY', promos: DEAD }],
+      ['a junk code from a mangled link', { code: 'DROP TABLE;', promos: LIVE }]
+    ]) {
+      const r = await checkout(null, null, bad);
+      check(`${label} still sells the book`, r.res.status, 200);
+      check(`${label} falls back to the typing box`, r.taken.get('allow_promotion_codes'), 'true');
+      check(`${label} attaches no discount`,
+        [...r.taken.keys()].filter((k) => k.startsWith('discounts')), []);
+    }
+
+    // A link plus the awkward account: the code has to survive the ladder, not
+    // just the first rung.
+    const linkNoTerms = await checkout(refusesBoth, null, { code: 'JERRELL', promos: LIVE });
+    check('a creator link survives an account that refuses everything',
+      linkNoTerms.taken.get('discounts[0][promotion_code]'), 'promo_live');
+    check('and that sale still goes through', linkNoTerms.res.status, 200);
+
+    // No code at all must not start costing a round trip.
+    check('a plain visit never asks Stripe about codes', happy.lookups, []);
+
   } finally {
     server.close();
   }
