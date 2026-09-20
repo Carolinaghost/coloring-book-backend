@@ -475,7 +475,13 @@ app.post('/creators', async (req, res) => {
   let promoId = '';
   try {
     const form = new URLSearchParams();
-    form.append('coupon', CREATOR_COUPON);
+    // Stripe's current API nests this. The older, flatter `coupon=` is not
+    // deprecated-but-working - it is rejected outright with "Received unknown
+    // parameter: coupon", which reads like a permissions problem and is not.
+    // The same move is why a promotion code now reports its coupon under
+    // `promotion.coupon` and has `coupon: null` at the top level.
+    form.append('promotion[type]', 'coupon');
+    form.append('promotion[coupon]', CREATOR_COUPON);
     form.append('code', code);
     form.append('metadata[creator_name]', name);
     form.append('metadata[creator_email]', email);

@@ -72,7 +72,16 @@ function stubStripe() {
       stripeCodes.add(code);
       stripeCreates.push({
         code,
-        coupon: form.get('coupon'),
+        // Read the way Stripe's current API actually spells it. The first cut
+        // of this sent a flat `coupon=creatortrack`, which a stub happily
+        // accepted and live Stripe rejected outright with "Received unknown
+        // parameter: coupon" - a message that reads like a permissions problem
+        // and is not one. A stub that accepts a shape the real API refuses is
+        // worse than no stub, so this reads only the nested spelling, and the
+        // flat one is asserted absent below.
+        promotionType: form.get('promotion[type]'),
+        coupon: form.get('promotion[coupon]'),
+        flatCoupon: form.get('coupon'),
         rate: form.get('metadata[rate_percent]'),
         email: form.get('metadata[creator_email]')
       });
@@ -154,6 +163,8 @@ async function main() {
     check('exactly one code was created in Stripe', stripeCreates.length, 1);
     // The whole point: a creator code tracks, it does not discount.
     check('against the tracking coupon, not a discount one', stripeCreates[0].coupon, 'creatortrack');
+    check('sent the way the current API spells it', stripeCreates[0].promotionType, 'coupon');
+    check('and not the flat spelling Stripe now rejects', stripeCreates[0].flatCoupon, null);
     check('with the rate recorded on the code itself', stripeCreates[0].rate, '25');
     check('and the creator reachable from Stripe alone', stripeCreates[0].email, 'jerrell@example.com');
 
