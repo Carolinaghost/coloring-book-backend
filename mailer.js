@@ -236,7 +236,7 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
 // a creator: the link is what goes in a bio, the code is what goes in a
 // caption somebody reads out loud. Give one and not the other and half the
 // audience has no way through.
-function creatorWelcomeEmail({ name, code, siteUrl, ratePercent }) {
+function creatorWelcomeEmail({ name, code, siteUrl, ratePercent, freeCode }) {
   const link = siteUrl + '?c=' + encodeURIComponent(code.toLowerCase());
   const first = String(name || '').trim().split(/\s+/)[0] || 'there';
   const rate = Number(ratePercent) || 25;
@@ -248,7 +248,16 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent }) {
     '',
     'Your code:  ' + code,
     'Your link:  ' + link,
-    '',
+    ''
+  ];
+  if (freeCode) {
+    text.push(
+      'And your free book, on us: use code ' + freeCode + ' at checkout. It works',
+      'once, it never expires, and it takes the price to zero.',
+      ''
+    );
+  }
+  text.push(
     'Either one works. The link is for your bio; the code is for when somebody',
     'is reading your caption or listening to you say it out loud. Both track',
     'back to you, and neither changes the price your audience pays.',
@@ -266,7 +275,8 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent }) {
     'owed comes from accounts@crayonauts.com.',
     '',
     '- Crayonauts'
-  ].join('\n');
+  );
+  const textBody = text.join('\n');
   const html = [
     '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
     '<h2 style="color:#2F5FA8;">You&rsquo;re in, ' + escapeHtml(first) + '</h2>',
@@ -277,6 +287,13 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent }) {
     '<p style="margin:0 0 6px;font-size:13px;color:#6B6357;">Your link</p>',
     '<p style="margin:0;"><a href="' + link + '">' + escapeHtml(link) + '</a></p>',
     '</div>',
+    freeCode
+      ? '<div style="background:#FBF6EA;border-left:4px solid #E8622C;border-radius:8px;padding:14px 16px;margin:18px 0;">'
+        + '<p style="margin:0 0 4px;font-weight:bold;">And your free book, on us.</p>'
+        + '<p style="margin:0;">Use <strong style="letter-spacing:1px;">' + escapeHtml(freeCode)
+        + '</strong> at checkout. It works once, it never expires, and it takes the price to zero.</p>'
+        + '</div>'
+      : '',
     '<p>Either one works. The link is for your bio; the code is for when somebody is reading your '
     + 'caption or listening to you say it out loud. Both track back to you, and neither changes the '
     + 'price your audience pays.</p>',
@@ -290,7 +307,7 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent }) {
     + 'Anything about what you&rsquo;re owed comes from accounts@crayonauts.com.</p>',
     '</div>'
   ].join('');
-  return { subject, text, html };
+  return { subject, text: textBody, html };
 }
 
 // Only ever wraps values that came off a form, so it covers the five that
