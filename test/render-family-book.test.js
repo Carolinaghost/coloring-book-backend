@@ -116,8 +116,10 @@ function main() {
   const prompt = fs.readFileSync(path.join(outDir, 'prompts.txt'), 'utf8');
   check('castLine ran, so the photos are tied to the name order',
     /one reference photo per person, in this same order: Mum \(an adult\) and Dad \(an adult\)/.test(prompt), true);
-  check('the subject is the family, not one child',
-    /Scene: the family /.test(prompt), true);
+  check('the subject is the named cast, not one child and not "the family"',
+    /Scene: Mum and Dad /.test(prompt), true);
+  check('and the cast is closed so no relatives get invented',
+    /These 2 are the only people this story is about/.test(prompt), true);
   check('and it uses the several-photos wording',
     /Use the reference photos only for faces/.test(prompt), true);
   check('the pairing is printed before anything is spent',

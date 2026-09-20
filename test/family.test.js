@@ -80,7 +80,9 @@ async function main() {
   check('the photos are tied to the order they are sent in',
     family.includes('one reference photo per person, in this same order'), true);
   check('ages are held apart', family.includes('the adults as adults and the children as children'), true);
-  check('the scene is the family, not one child', family.includes('the family baking cookies'), true);
+  check('the scene names the cast, not one child and not "the family"',
+    family.includes('Mum, Dad and Leo baking cookies'), true);
+  check('"the family" never reaches the model', /\bthe family\b/.test(family), false);
   check('no leftover "the child"', /\bthe child\b/.test(family.split('Scene:')[1]), false);
 
   console.log('\nThe child is the one the story follows');
@@ -97,8 +99,32 @@ async function main() {
     { name: 'Ivy', subjectType: 'kid' }, { name: 'Sam', subjectType: 'kid', star: true }
   ]);
   check('an explicit choice wins', chosen.includes("this is Sam's story"), true);
-  check('the family is around them, not instead of them',
+  check('the others are around them, not instead of them',
     family.includes('never instead of Leo'), true);
+
+  console.log('\nThe cast is closed');
+
+  // Order 64 came back with a mother, a father and a grandmother drawn in that
+  // nobody had uploaded, because the scene subject was the words "the family".
+  // Two things stop it: the cast is named in the scene line, and the model is
+  // told in as many words that nobody else is in the story.
+  const pair = buildPrompt('Superhero', 0, 1, 'kid', '', [
+    { name: 'Malik', subjectType: 'kid' }, { name: 'Jasmin', subjectType: 'kid', star: true }
+  ]);
+  check('the scene names them both', pair.includes('Malik and Jasmin discover'), true);
+  check('the count is stated', pair.includes('These 2 are the only people this story is about'), true);
+  check('inventing relatives is ruled out',
+    pair.includes('no extra parents, brothers, sisters or grandparents'), true);
+  check('and scene-called extras are still allowed',
+    pair.includes('Anyone else appears only if the scene below names them'), true);
+  // The scenes that do call for other people must still read correctly.
+  const crowd = buildPrompt('Superhero', 11, 1, 'kid', '', [
+    { name: 'Malik', subjectType: 'kid' }, { name: 'Jasmin', subjectType: 'kid', star: true }
+  ]);
+  check('a crowd scene stays plural and keeps its crowd',
+    crowd.includes('Malik and Jasmin are cheered on by a crowd'), true);
+  // Three names join with commas, and the verb still agrees.
+  check('three names read as a list', family.includes('Mum, Dad and Leo'), true);
 
   console.log('\nEvery theme can carry a family');
 
@@ -114,9 +140,12 @@ async function main() {
   check('every scene in every theme names the child', sceneless, []);
 
   // And the swap really happens, on a theme other than the one it was built on.
-  const everyTheme = Object.keys(STORY_SCENES).filter((theme) =>
-    !buildPrompt(theme, 0, 1, 'kid', '', FAMILY).includes('the family'));
-  check('and the family reaches the scene on all of them', everyTheme, []);
+  const everyTheme = Object.keys(STORY_SCENES).filter((theme) => {
+    const built = buildPrompt(theme, 0, 1, 'kid', '', FAMILY);
+    const scene = built.split('Scene:')[1] || '';
+    return !scene.includes('Mum, Dad and Leo') || /\bthe child\b/.test(scene);
+  });
+  check('and the cast reaches the scene on all of them', everyTheme, []);
 
   console.log('\nA one-person book is left exactly as it was');
 

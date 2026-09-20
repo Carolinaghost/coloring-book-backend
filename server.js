@@ -1138,23 +1138,41 @@ function pickStar(people) {
 // Who the book is about, tied to the order the photos are sent in. The model
 // gets one photo per person rather than one crowded group shot, so it has to be
 // told which is which - "in the same order" is the whole hinge.
+// "Malik and Jasmin", "Owen, Mum and Dad". Used both to name the cast to the
+// model and as the subject of the scene line, so the two always agree.
+function joinNames(list) {
+  if (list.length === 1) return list[0];
+  return list.slice(0, -1).join(', ') + ' and ' + list[list.length - 1];
+}
+
+function nameList(people) {
+  return joinNames(people.map((p) => p.name));
+}
+
 function castLine(people) {
   const star = pickStar(people);
   const described = people.map((p) => {
     const kind = p.subjectType === 'adult' ? 'an adult' : 'a child';
     return `${p.name} (${kind})`;
   });
-  const list = described.length > 1
-    ? described.slice(0, -1).join(', ') + ' and ' + described[described.length - 1]
-    : described[0];
+  const list = joinNames(described);
+  // The closed-cast sentence is the whole point of this block. Without it the
+  // model treats a two-child book as "a family" and draws in a mother, a father
+  // and a grandmother who were never uploaded - found on order 64, 20 Sep.
+  // Scene-called extras (a cheering crowd, an elderly person at a crossing) are
+  // written into the scene text, so they are allowed through by name.
   return `There is one reference photo per person, in this same order: ${list}. `
+    + `These ${people.length} are the only people this story is about. `
+    + 'Do not invent or add any other family members - no extra parents, brothers, sisters '
+    + 'or grandparents, and no stand-in adults. Anyone else appears only if the scene below '
+    + 'names them. '
     + 'Each photo shows only that person; use it for their face, hair and features and nobody else\'s. '
     + 'Keep every one of them recognisable on every page they appear, and draw them at their own age - '
     + 'the adults as adults and the children as children, never all the same size. '
     + 'Recognisable means the same likeness, not the same pose: vary posture, expression and viewing '
-    + 'angle from scene to scene. Show the family together, doing the scene as a group, '
-    + `and keep ${star.name} at the centre of it: this is ${star.name}'s story and the rest of the `
-    + `family are there with ${star.name}, never instead of ${star.name}.`;
+    + 'angle from scene to scene. Show them together, doing the scene as a group, '
+    + `and keep ${star.name} at the centre of it: this is ${star.name}'s story and the others `
+    + `are there with ${star.name}, never instead of ${star.name}.`;
 }
 
 function subjectPhrase(count, subjectType) {
@@ -1363,9 +1381,13 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people, 
 
   // The scenes are written around "the child". A family does the same thing
   // together, so the subject becomes the family and the verb follows it.
-  const subject = isFamily ? 'the family' : subjectPhrase(childCount, subjectType);
+  // Named, not "the family". "The family discovers a glowing cape" told the
+  // model to draw a whole family unit and it duly invented the missing halves
+  // of one; "Malik and Jasmin discover a glowing cape" cannot be padded out.
+  // A cast is always two or more, so the verb after it is always plural.
+  const subject = isFamily ? nameList(cast) : subjectPhrase(childCount, subjectType);
   if (isFamily || childCount > 1) {
-    scene = scene.replace(/\bthe child\b(\s+)([a-z]+)/g, (match, gap, word) => subject + gap + (isFamily ? word : pluralizeVerb(word)));
+    scene = scene.replace(/\bthe child\b(\s+)([a-z]+)/g, (match, gap, word) => subject + gap + pluralizeVerb(word));
   }
   scene = scene.replace(/\bthe child\b/g, subject);
   const who = isFamily ? castLine(cast) : consistencyLine(childCount, subjectType);
