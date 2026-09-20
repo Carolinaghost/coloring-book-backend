@@ -674,7 +674,18 @@ if (!CAN_CALL_OPENAI) {
 // few days of stubble came back with a chin of hundreds of tiny dots - already
 // grey, nothing left for a child to colour - while the hair on his head obeyed
 // the rule perfectly.
-const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands, well separated, with plenty of white showing between them - never fill hair with solid black, dense scribbles, crosshatching, stippling, any field of small dots, or a dense curtain of many fine parallel strands, no matter how dark or curly the hair is in the photo. Draw a beard, moustache or stubble the same way: one clean outline around the shape of it and open white inside, never speckles, flecks or shaded texture, however short the hair is. Every part of the drawing must be left white so a child can color it in.';
+// Trademark and copyright. A child's photo very often carries somebody else's
+// property on it - a swoosh, a team crest, a cartoon character on a pyjama top -
+// and drawing it reproduces that mark in something being sold. The text ban
+// above does not cover this: a logo is a picture, not a word, and it walks
+// straight past a rule about letters. It also walks past the OCR word check,
+// which reads lettering and is blind to artwork by design.
+//
+// So prevention is the only control there is here, and it has to name the
+// categories rather than gesture at them - the stippling lesson, again: a ban
+// only stops what it can name.
+
+const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands, well separated, with plenty of white showing between them - never fill hair with solid black, dense scribbles, crosshatching, stippling, any field of small dots, or a dense curtain of many fine parallel strands, no matter how dark or curly the hair is in the photo. Draw a beard, moustache or stubble the same way: one clean outline around the shape of it and open white inside, never speckles, flecks or shaded texture, however short the hair is. Never reproduce any logo, emblem, team crest, badge, brand mark, wordmark, slogan, mascot, cartoon character or licensed artwork, even when one is clearly printed on clothing, a bag, a cap, a cup, a toy or anything else in the photo - draw that surface as plain blank fabric or plain blank material with nothing on it, keeping only the shape of the garment or object itself. Every part of the drawing must be left white so a child can color it in.';
 
 // BASE_STYLE fixes the look - bold outlines, no shading, no text, open hair -
 // but says nothing about how MUCH is in the picture. Left to itself the model
