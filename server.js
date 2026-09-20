@@ -368,7 +368,12 @@ async function resolvePromotionCode(code) {
 // of abuse is junk promotion codes cluttering Stripe, which the per-visitor
 // cap below keeps to a nuisance rather than a problem.
 const CREATOR_COUPON = process.env.CREATOR_COUPON || 'creatortrack';
-const CREATOR_RATE_PERCENT = parseInt(process.env.CREATOR_RATE_PERCENT, 10) || 25;
+// 20, not 25. Jerrell negotiated 25 and is the only one on it; every creator
+// who signs up through the form is on 20, which is what the payout report has
+// always defaulted to. Setting this to 25 would quietly promise every new
+// creator a rate the Thursday report does not pay them, and the first anyone
+// would hear of it is a creator who counted.
+const CREATOR_RATE_PERCENT = parseInt(process.env.CREATOR_RATE_PERCENT, 10) || 20;
 const CREATOR_SIGNUPS_PER_IP = parseInt(process.env.CREATOR_SIGNUPS_PER_IP, 10) || 3;
 // The three mailboxes do three jobs and must not bleed into each other.
 // support@ belongs to customers - a parent whose book has not arrived. admin@
