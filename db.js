@@ -18,6 +18,7 @@ let pool = null;
 let memoryOrders = [];
 const memoryPreviewQuota = new Map();
 const memorySignupQuota = new Map();
+const memoryJobRuns = new Set();
 const memoryCreators = [];
 let memoryEvents = [];
 let nextMemoryId = 1;
@@ -154,6 +155,24 @@ const CREATOR_MIGRATIONS = [
   "ALTER TABLE creators ADD COLUMN IF NOT EXISTS free_promo_id TEXT NOT NULL DEFAULT ''"
 ];
 
+// One row per job per occasion it was supposed to run. The primary key is the
+// whole mechanism: two web processes, or one process that redeployed inside
+// the same hour, both try to insert and exactly one of them wins. The loser
+// gets no row back and sends nothing.
+//
+// A timer plus a variable in memory - which is how the daily digest does it -
+// forgets everything on redeploy, and Render redeploys whenever main moves.
+// For a digest that means a duplicate. For the payout report it would mean
+// Jonathan reading two different totals on a morning he is paying people.
+const CREATE_JOB_RUNS_SQL = `
+  CREATE TABLE IF NOT EXISTS job_runs (
+    job     TEXT        NOT NULL,
+    ran_for TEXT        NOT NULL,
+    ran_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (job, ran_for)
+  );
+`;
+
 const CREATE_CREATORS_SQL = `
   CREATE TABLE IF NOT EXISTS creators (
     id           SERIAL      PRIMARY KEY,
@@ -238,6 +257,7 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_EVENTS_SQL);
     await pool.query(CREATE_EVENTS_INDEX_SQL);
     await pool.query(CREATE_CREATORS_SQL);
+    await pool.query(CREATE_JOB_RUNS_SQL);
     for (const sql of CREATOR_MIGRATIONS) await pool.query(sql);
     ready = true;
     lastError = null;
@@ -1177,6 +1197,24 @@ async function listCreators() {
   return rows.map(rowToCreator);
 }
 
+// True for whoever gets there first, false for everybody else, forever. The
+// caller only sends when it is true.
+async function claimJobRun(job, ranFor) {
+  if (!usingPostgres) {
+    const key = `${job}|${ranFor}`;
+    if (memoryJobRuns.has(key)) return false;
+    memoryJobRuns.add(key);
+    return true;
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO job_runs (job, ran_for) VALUES ($1, $2)
+       ON CONFLICT (job, ran_for) DO NOTHING
+     RETURNING ran_at`,
+    [job, ranFor]
+  );
+  return rows.length > 0;
+}
+
 module.exports = {
   // Scripts that need raw SQL (scripts/reencode-pages.js) reach the pool here.
   // Null when running on the in-memory store, which those scripts check for.
@@ -1185,6 +1223,7 @@ module.exports = {
   takePreviewQuota,
   purgeOldPreviewQuota,
   takeSignupQuota,
+  claimJobRun,
   getCreatorByEmail,
   codeTaken,
   saveCreator,
