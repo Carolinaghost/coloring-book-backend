@@ -50,11 +50,20 @@ function errorFrom(fn) {
 
 // Stripe, as far as the report is concerned: the promotion code list and the
 // checkout sessions, and nothing else answers.
-function stripeStub({ codes, sessions, coupons, byCoupon, asked }) {
+function stripeStub({ codes, sessions, coupons, byCoupon, asked, history }) {
   return async (url) => {
     const at = new URL(url);
     const path = at.pathname;
     if (asked && path === '/v1/checkout/sessions') asked.push(at.searchParams);
+    // The report asks for sessions twice and means two different things. The
+    // window has a created[gte]; the "has this code ever earned before" sweep
+    // has only a created[lt]. Answering both with the same list is what a
+    // careless stub does, and it would make the first-sale flag untestable -
+    // every code would look like it had earned before.
+    if (path === '/v1/checkout/sessions'
+        && at.searchParams.has('created[lt]') && !at.searchParams.has('created[gte]')) {
+      return { ok: true, json: async () => ({ data: history || [], has_more: false }) };
+    }
     // /v1/promotion_codes?coupon=co_1 is a different question from
     // /v1/promotion_codes, and answering both with the same list would hide
     // exactly the bug the coupon lookup exists to fix.
@@ -257,13 +266,14 @@ async function main() {
 
   const { out: csv } = await runReport(['--csv', '--rates', 'jerrell=25'], FIXTURE);
   check('the CSV header carries the rate before owed',
-    csv[0], 'code,coupon,active,sales,customers_paid,rate_percent,owed');
+    csv[0], 'code,coupon,active,sales,customers_paid,rate_percent,owed,'
+      + 'first_sale,creator_name,creator_email');
   // $40 at 25% is $10. At the old single rate it would print $8.00 and look
   // exactly as correct as this does.
   check('lowercase jerrell=25 matched JERRELL, and $40 owes $10',
-    csvRow(csv, 'JERRELL').slice(3), ['2', '40.00', '25', '10.00']);
+    csvRow(csv, 'JERRELL').slice(3, 7), ['2', '40.00', '25', '10.00']);
   check('the code nobody named is untouched at 20%: $40 owes $8',
-    csvRow(csv, 'OWEN10').slice(3), ['1', '40.00', '20', '8.00']);
+    csvRow(csv, 'OWEN10').slice(3, 7), ['1', '40.00', '20', '8.00']);
   check('the unpaid $99 order is still worth nothing to anybody',
     csvRow(csv, 'JERRELL')[4], '40.00');
   check('nothing is warned about when every named code exists', (await runReport(
@@ -288,7 +298,7 @@ async function main() {
   check('and the warning stays out of the CSV',
     typo.out.every((l) => !/WARNING/.test(l)), true);
   check('meanwhile the typo really did leave Jerrell on the default rate',
-    csvRow(typo.out, 'JERRELL').slice(5), ['20', '8.00']);
+    csvRow(typo.out, 'JERRELL').slice(5, 7), ['20', '8.00']);
 
   check('a bad --rates stops the report instead of paying the default',
     /between 0 and 100/.test(
@@ -349,13 +359,100 @@ async function main() {
   check('an unnamed coupon falls back to its id, not to a dash',
     /co_2/.test(tableRow(rak.out, 'OWEN10')), true);
   check('and the money is untouched by the lookup',
-    csvRow((await runReport(['--csv'], RESTRICTED)).out, 'JERRELL').slice(4),
+    csvRow((await runReport(['--csv'], RESTRICTED)).out, 'JERRELL').slice(4, 7),
     ['20.00', '20', '4.00']);
 
   // The full-key path must not start asking Stripe for coupons it does not
   // need: FIXTURE's stub has no /v1/coupons answer, so a stray call throws.
   check('a key that does attach the coupon asks for nothing extra',
     /Partner/.test(tableRow((await runReport([], FIXTURE)).out, 'JERRELL')), true);
+
+  console.log('\nSomebody earning for the first time');
+  // Before a creator can be paid they have to be set up as a contractor - a
+  // W-9 and bank details they enter themselves. Nothing announces that moment
+  // except money arriving, so the report has to, and it has to be right about
+  // WHICH week it arrived in. Flag somebody twice and they get chased for a
+  // form they already filled; miss it and they are paid with no W-9 on file.
+  const WITH_CREATORS = {
+    codes: [
+      { id: 'promo_n', code: 'NEWBIE', active: true, coupon: { id: 'co_1', name: 'Creator tracking' },
+        metadata: { creator_name: 'Sam Rivers', creator_email: 'sam@example.com' } },
+      { id: 'promo_o', code: 'OLDHAND', active: true, coupon: { id: 'co_1', name: 'Creator tracking' },
+        metadata: { creator_name: 'Dana Fox', creator_email: 'dana@example.com' } },
+      { id: 'promo_h', code: 'BYHAND', active: true, coupon: { id: 'co_1', name: 'Creator tracking' } }
+    ],
+    sessions: [
+      paid({ ...withCode('promo_n'), amount_total: 1500, amount_subtotal: 1500 }),
+      paid({ ...withCode('promo_o'), amount_total: 1500, amount_subtotal: 1500 }),
+      paid({ ...withCode('promo_h'), amount_total: 2500, amount_subtotal: 2500 })
+    ],
+    // OLDHAND sold something before this week. NEWBIE and BYHAND never have.
+    history: [paid({ ...withCode('promo_o'), amount_total: 1500, amount_subtotal: 1500 })]
+  };
+
+  const first = await runReport([], WITH_CREATORS);
+  const firstText = first.out.join('\n');
+  check('the first-timer is called out', /NEWBIE/.test(
+    firstText.slice(firstText.indexOf('earned for the FIRST time'))), true);
+  check('and named, so you can set them up without looking anything up',
+    /Sam Rivers <sam@example\.com>/.test(firstText), true);
+  check('somebody who has earned before is not chased again',
+    /Dana Fox/.test(firstText), false);
+  check('a code made by hand carries no details, and the report says so',
+    /BYHAND[^\n]*made by hand/.test(firstText), true);
+  check('it says where to go, rather than only that something is needed',
+    /Payroll > Contractors/.test(firstText), true);
+  check('two of the three are new', (firstText.match(/earned for the FIRST time/) ? 
+    Number(/(\d+) code\(s\) earned for the FIRST time/.exec(firstText)[1]) : 0), 2);
+
+  // A code with no sales this week is not a first sale, however new it is.
+  const quiet = await runReport([], {
+    ...WITH_CREATORS,
+    sessions: [paid({ ...withCode('promo_o'), amount_total: 1500, amount_subtotal: 1500 })]
+  });
+  check('a creator who sold nothing this week is not flagged',
+    /earned for the FIRST time/.test(quiet.out.join('\n')), false);
+
+  // A free book is redeemed at $0. Its holder earns nothing and never will,
+  // so chasing them for a W-9 is a wasted trip for both of them.
+  const freebie = await runReport([], {
+    codes: [{ id: 'promo_f', code: 'FREE-ABC123', active: true,
+      coupon: { id: 'co_free', name: 'Free book 100 percent' } }],
+    sessions: [paid({ ...withCode('promo_f'), amount_total: 0, amount_subtotal: 1500 })],
+    history: []
+  });
+  check('a code redeemed at zero is never flagged for setup',
+    /earned for the FIRST time/.test(freebie.out.join('\n')), false);
+
+  console.log('\nClearing out the dead codes');
+  // Testing leaves deactivated codes behind forever - Stripe will not delete a
+  // promotion code - and after a few rounds there is more history in the table
+  // than business. A dead code that never sold is hidden but still counted by
+  // name, so nothing disappears quietly. A dead code that DID sell stays put,
+  // because that is money somebody is owed.
+  const WITH_DEAD = {
+    codes: [
+      { id: 'promo_live', code: 'LIVE', active: true, coupon: { id: 'co_1', name: 'Creator tracking' } },
+      { id: 'promo_dead', code: 'ZZTEST', active: false, coupon: { id: 'co_1', name: 'Creator tracking' } },
+      { id: 'promo_deadsold', code: 'RETIRED', active: false, coupon: { id: 'co_1', name: 'Creator tracking' } }
+    ],
+    sessions: [paid({ ...withCode('promo_deadsold'), amount_total: 1500, amount_subtotal: 1500 })],
+    history: [paid({ ...withCode('promo_deadsold'), amount_total: 1500, amount_subtotal: 1500 })]
+  };
+  const dead = await runReport([], WITH_DEAD);
+  const deadText = dead.out.join('\n');
+  check('a live code with no sales still shows - somebody is not posting',
+    /^LIVE\s/m.test(deadText), true);
+  check('a dead code with no sales is off the table', /^ZZTEST\s/m.test(deadText), false);
+  check('but it is named, not silently dropped', /not listed: ZZTEST/.test(deadText), true);
+  check('and a dead code that sold stays, because that is money owed',
+    /^RETIRED\s/m.test(deadText), true);
+
+  const csvNew = await runReport(['--csv'], WITH_CREATORS);
+  check('the CSV carries it too, for anyone reading it with a spreadsheet',
+    csvRow(csvNew.out, 'NEWBIE').slice(7), ['yes', 'Sam Rivers', 'sam@example.com']);
+  check('and says no for the one who has earned before',
+    csvRow(csvNew.out, 'OLDHAND').slice(7, 8), ['no']);
 
   console.log(`\n${pass} passed, ${failures.length} failed`);
   if (failures.length) {

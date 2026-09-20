@@ -332,6 +332,7 @@ async function main(deps = {}) {
   codes.forEach((c) => {
     const upper = String(c.code || '').toUpperCase();
     byId.set(c.id, {
+      id: c.id,
       code: c.code,
       coupon: (c.coupon && (c.coupon.name || c.coupon.id)) || couponFor.get(c.id) || '-',
       active: c.active,
@@ -339,6 +340,11 @@ async function main(deps = {}) {
       // all read the same number. Working it out again at print time is how a
       // table and a CSV of the same run end up disagreeing.
       rate: rates.has(upper) ? rates.get(upper) : rate,
+      // Written onto the code when the creator signed up, so the report can
+      // name the person and not just the code. Absent on the codes made by
+      // hand in the dashboard before the sign-up form existed.
+      creatorName: (c.metadata && c.metadata.creator_name) || '',
+      creatorEmail: (c.metadata && c.metadata.creator_email) || '',
       sales: 0,
       paid: 0,
       list: 0
@@ -377,14 +383,43 @@ async function main(deps = {}) {
 
   const { unattributed, unattributedPaid, unknown } = tally(sessions, byId);
 
+  // Somebody earning for the first time is the one moment that needs a human:
+  // before they can be paid they have to be set up as a contractor, which
+  // means a W-9 and bank details they enter themselves. Nothing tells you that
+  // moment has arrived except the money showing up, so the report has to.
+  //
+  // "First time" is asked of Stripe rather than kept in a list, because a list
+  // is a thing to maintain and forget. Every complete session BEFORE this
+  // window, once: any code in there has earned before and is already dealt
+  // with. It is a second pass over the history and it grows with the business,
+  // which is fine at this size and is the thing to change first if the report
+  // ever gets slow.
+  const earnedBefore = new Set();
+  for (const s of await listAll('/checkout/sessions',
+    { 'created[lt]': since, status: 'complete' }, io)) {
+    if (s.payment_status !== 'paid') continue;
+    const id = promoIdFromSession(s);
+    if (id) earnedBefore.add(id);
+  }
+
   const rows = [...byId.values()]
-    .map((r) => ({ ...r, owed: Math.round((PAY_ON === 'list' ? r.list : r.paid) * r.rate / 100) }))
+    .map((r) => {
+      const owed = Math.round((PAY_ON === 'list' ? r.list : r.paid) * r.rate / 100);
+      return { ...r, owed,
+      // Owed, not just used. A free-book code gets redeemed at $0 and earns
+      // its holder nothing - flagging that sends Jonathan off to set up a
+      // contractor for somebody he owes no money and never will. The only
+      // person who needs a W-9 on file is one who is about to be paid.
+      firstSale: r.sales > 0 && owed > 0 && !earnedBefore.has(r.id) };
+    })
     .sort((a, b) => b.owed - a.owed || a.code.localeCompare(b.code));
 
   if (args.csv) {
-    console.log('code,coupon,active,sales,customers_paid,rate_percent,owed');
+    console.log('code,coupon,active,sales,customers_paid,rate_percent,owed,'
+      + 'first_sale,creator_name,creator_email');
     rows.forEach((r) => console.log([r.code, r.coupon, r.active, r.sales,
-      (r.paid / 100).toFixed(2), r.rate, (r.owed / 100).toFixed(2)].map(csvCell).join(',')));
+      (r.paid / 100).toFixed(2), r.rate, (r.owed / 100).toFixed(2),
+      r.firstSale ? 'yes' : 'no', r.creatorName, r.creatorEmail].map(csvCell).join(',')));
     return;
   }
 
@@ -395,10 +430,17 @@ async function main(deps = {}) {
       + `${now.toISOString().slice(0, 10)}  (${days} days, rolling - not a pay week)`;
   console.log(`\n${heading}  (${rate}% of what customers paid`
     + (overrides ? `, ${overrides} code(s) on their own rate` : '') + ')\n');
+  // A live code with no sales is news - somebody is not posting. A DEAD code
+  // with no sales is just history, and after a few rounds of testing there is
+  // more history in this table than business. Hidden, counted, never silent:
+  // an inactive code that DID sell still shows, because that is money owed.
+  const retired = rows.filter((r) => !r.active && r.sales === 0);
+  const shown = rows.filter((r) => r.active || r.sales > 0);
+
   console.log('CODE              SALES   CUSTOMERS PAID   RATE      OWED   COUPON');
   console.log('-'.repeat(78));
   let totalSales = 0, totalPaid = 0, totalOwed = 0;
-  for (const r of rows) {
+  for (const r of shown) {
     totalSales += r.sales; totalPaid += r.paid; totalOwed += r.owed;
     const flag = r.active ? '' : '  (inactive)';
     console.log(
@@ -415,6 +457,10 @@ async function main(deps = {}) {
   // would be a third rate that nobody is actually paid.
   console.log('TOTAL'.padEnd(18) + String(totalSales).padStart(5) + money(totalPaid).padStart(16)
     + ''.padStart(7) + money(totalOwed).padStart(10));
+  if (retired.length) {
+    console.log(`\n${retired.length} deactivated code(s) with no sales are not listed: `
+      + retired.map((r) => r.code).join(', '));
+  }
   if (unattributed) {
     console.log(`\n${unattributed} paid order(s) used no code - ${money(unattributedPaid)}. Those are yours, nobody is owed.`);
   }
@@ -422,6 +468,21 @@ async function main(deps = {}) {
     console.log(`\nWARNING: ${unknown.size} code(s) were used that are not in your promotion code list.`);
     console.log('Somebody earned these and is not being paid for them. Deleted from the dashboard?');
     for (const [id, seen] of unknown) console.log(`  ${id}  ${seen.sales} sale(s)  ${money(seen.paid)}`);
+  }
+  // Printed last, under the money, because it is the only thing in this report
+  // that asks Jonathan to go and do something.
+  const newcomers = rows.filter((r) => r.firstSale);
+  if (newcomers.length) {
+    console.log(`\n${newcomers.length} code(s) earned for the FIRST time this week.`);
+    console.log('Set each of these up as a contractor in QuickBooks before paying them:');
+    console.log('QuickBooks > Payroll > Contractors > Add a contractor. They fill in their');
+    console.log('own W-9 and bank details - you never handle either.\n');
+    for (const r of newcomers) {
+      const who = r.creatorEmail
+        ? `${r.creatorName || r.code} <${r.creatorEmail}>`
+        : 'no name or email on this code - it was made by hand, so find them yourself';
+      console.log(`  ${r.code.padEnd(18)} ${money(r.owed).padStart(9)}   ${who}`);
+    }
   }
   if (!totalSales) console.log('\nNo code was used in this window.');
   console.log('');
