@@ -1518,7 +1518,7 @@ app.post('/convert', upload.fields([
       const blocked = await takeFreePreview(req.ip || 'unknown');
       if (blocked === 'visitor') {
         return res.status(429).json({
-          error: 'You have used up today\'s free previews. They reset tomorrow, or finish an order to get the whole book now.'
+          error: 'You have used up today\'s free previews. Finish an order to get the whole book now.'
         });
       }
       if (blocked === 'site') {
