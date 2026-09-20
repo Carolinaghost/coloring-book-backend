@@ -21,7 +21,7 @@ process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_not_a_
 delete process.env.DATABASE_URL;   // exercise the in-memory store
 
 const db = require('../db.js');
-const { previewDay } = require('../server.js');
+const { previewDay, clientIp } = require('../server.js');
 
 let pass = 0;
 const failures = [];
@@ -76,6 +76,31 @@ async function main() {
     previewDay(new Date('2026-09-21T04:30:00Z')), '2026-09-21');
   check('the shape is what a DATE column wants',
     /^\d{4}-\d{2}-\d{2}$/.test(previewDay(new Date())), true);
+
+  console.log('\nWho the visitor actually is');
+
+  // The bug this caught in production: two proxies sit in front of the app and
+  // trust proxy is 1, so req.ip is the Cloudflare edge. The first row ever
+  // written to preview_quota was 172.71.190.90 - a Cloudflare address, not a
+  // person. Everyone behind that edge would have shared one daily allowance.
+  const req = (headers, ip) => ({ headers, ip });
+
+  check('Cloudflare tells us the real visitor, and we believe it',
+    clientIp(req({ 'cf-connecting-ip': '203.0.113.9', 'x-forwarded-for': '203.0.113.9, 172.71.190.90' },
+      '172.71.190.90')), '203.0.113.9');
+  check('without Cloudflare, the leftmost forwarded address is the client',
+    clientIp(req({ 'x-forwarded-for': '203.0.113.9, 10.0.0.1, 10.0.0.2' }, '10.0.0.2')), '203.0.113.9');
+  check('spaces around the entries do not become part of the key',
+    clientIp(req({ 'x-forwarded-for': '  203.0.113.9 , 10.0.0.1' }, '10.0.0.2')), '203.0.113.9');
+  check('an empty header is not treated as an address',
+    clientIp(req({ 'cf-connecting-ip': '   ', 'x-forwarded-for': '' }, '10.0.0.2')), '10.0.0.2');
+  check('with no proxy headers at all it falls back to the socket',
+    clientIp(req({}, '10.0.0.2')), '10.0.0.2');
+  check('and with nothing at all it still returns a usable key',
+    clientIp(req({}, undefined)), 'unknown');
+  // The specific failure mode, stated as a test so it cannot come back.
+  check('the Cloudflare edge is never what gets counted',
+    clientIp(req({ 'cf-connecting-ip': '198.51.100.4' }, '172.71.190.90')) === '172.71.190.90', false);
 
   console.log(`\n${pass} passed, ${failures.length} failed`);
   if (failures.length) {

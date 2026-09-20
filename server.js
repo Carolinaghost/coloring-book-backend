@@ -1367,7 +1367,7 @@ app.post('/event', async (req, res) => {
   // happens and the page never waits on it.
   res.status(204).end();
   try {
-    if (!takeEventSlot(req.ip || 'unknown')) return;
+    if (!takeEventSlot(clientIp(req))) return;
     // 'paid' is recorded by the Stripe webhook alone. Accepting it here would
     // let anyone inflate the only number that matters.
     if (req.body && req.body.type === 'paid') return;
@@ -1422,6 +1422,36 @@ app.get('/story-length', (req, res) => {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
   res.json({ theme, sceneCount: scenes.length });
 });
+
+
+// Who the visitor actually is.
+//
+// There are two proxies in front of this app - Cloudflare, then Render's load
+// balancer - and `trust proxy` is set to 1, so Express peels off one hop and
+// lands on the Cloudflare edge, not the person. Every visitor routed through
+// the same edge looks like one visitor.
+//
+// That does not matter for logging. It matters enormously for anything that
+// rations by visitor: a whole city shares one Cloudflare edge, so a per-visitor
+// daily allowance becomes a per-city daily allowance, and real customers get
+// turned away while the site looks fine.
+//
+// CF-Connecting-IP is set by Cloudflare itself and overwrites anything the
+// client sent, so it is the trustworthy one as long as traffic arrives through
+// Cloudflare. X-Forwarded-For is the fallback, leftmost entry being the
+// original client. Both can be forged by anyone who reaches the origin
+// directly, and that is accepted: the prize for forging is a few more free
+// previews, which is exactly what the old limiter gave away for nothing.
+function clientIp(req) {
+  const cf = req.headers['cf-connecting-ip'];
+  if (typeof cf === 'string' && cf.trim()) return cf.trim();
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd.trim()) {
+    const first = fwd.split(',')[0].trim();
+    if (first) return first;
+  }
+  return req.ip || 'unknown';
+}
 
 // A small rate limiter for free previews. No dependency, no store: a Map of
 // visitor -> timestamps inside a rolling hour, plus a site-wide count. It
@@ -1515,7 +1545,7 @@ app.post('/convert', upload.fields([
     let previewOrder = null;
     if (sceneIndex < FREE_PREVIEW_PAGES) {
       // Nobody has paid for this one yet, so it has to be rationed.
-      const blocked = await takeFreePreview(req.ip || 'unknown');
+      const blocked = await takeFreePreview(clientIp(req));
       if (blocked === 'visitor') {
         return res.status(429).json({
           error: 'You have used up today\'s free previews. Finish an order to get the whole book now.'
@@ -1964,5 +1994,5 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, previewDay, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, previewDay, clientIp, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
