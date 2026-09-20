@@ -85,8 +85,15 @@ function base64Lines(buffer) {
   return (buffer.toString('base64').match(/.{1,76}/g) || []).join('\r\n');
 }
 
-function buildMessage({ to, subject, text, html, attachments }) {
+// `from` and `replyTo` are per-message because the three mailboxes on this
+// domain do three different jobs: support@ is the customer's, admin@ sets
+// creators up, accounts@ handles what they get paid. A creator whose welcome
+// arrives from support@ replies to support@, and their question lands in the
+// queue meant for parents whose book has not turned up.
+function buildMessage({ to, subject, text, html, attachments, from, replyTo }) {
   const alt = 'alt_' + Math.random().toString(36).slice(2);
+  const sender = from || FROM;
+  const answers = replyTo || sender;
 
   // The two readable versions of the same message.
   const altPart = [
@@ -105,7 +112,8 @@ function buildMessage({ to, subject, text, html, attachments }) {
   const files = attachments || [];
   if (!files.length) {
     const headers = [
-      'From: ' + FROM_NAME + ' <' + FROM + '>',
+      'From: ' + FROM_NAME + ' <' + sender + '>',
+      'Reply-To: ' + answers,
       'To: ' + to,
       'Subject: ' + subject,
       'MIME-Version: 1.0',
@@ -120,7 +128,8 @@ function buildMessage({ to, subject, text, html, attachments }) {
   // the other way round, most clients show the PDF instead of the message.
   const mixed = 'mix_' + Math.random().toString(36).slice(2);
   const headers = [
-    'From: ' + FROM_NAME + ' <' + FROM + '>',
+    'From: ' + FROM_NAME + ' <' + sender + '>',
+    'Reply-To: ' + answers,
     'To: ' + to,
     'Subject: ' + subject,
     'MIME-Version: 1.0',
@@ -150,8 +159,11 @@ function buildMessage({ to, subject, text, html, attachments }) {
   return headers + '\r\n' + parts.join('\r\n');
 }
 
-async function sendMail({ to, subject, text, html, attachments }) {
+async function sendMail({ to, subject, text, html, attachments, from, replyTo }) {
   if (!configured) throw new Error('SMTP_USER / SMTP_PASS are not set.');
+  // The envelope sender follows the header, or the two disagree and every
+  // receiver that checks alignment - which is all of them now - marks it down.
+  const sender = from || FROM;
 
   let socket = await connect();
   try {
@@ -171,11 +183,11 @@ async function sendMail({ to, subject, text, html, attachments }) {
     await say(socket, Buffer.from(USER).toString('base64'), [334]);
     await say(socket, Buffer.from(PASS).toString('base64'), [235]);
 
-    await say(socket, 'MAIL FROM:<' + FROM + '>', [250]);
+    await say(socket, 'MAIL FROM:<' + sender + '>', [250]);
     await say(socket, 'RCPT TO:<' + to + '>', [250, 251]);
     await say(socket, 'DATA', [354]);
 
-    socket.write(dotStuff(buildMessage({ to, subject, text, html, attachments })) + '\r\n.\r\n');
+    socket.write(dotStuff(buildMessage({ to, subject, text, html, attachments, from: sender, replyTo })) + '\r\n.\r\n');
     await readReply(socket, [250]);
 
     try { await say(socket, 'QUIT', [221]); } catch (e) { /* some servers just hang up */ }
@@ -250,7 +262,8 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent }) {
     'That is where your tax form and your bank details go - please do not send',
     'either of those by email.',
     '',
-    'Any questions, just reply to this.',
+    'Anything about setting up, just reply to this. Anything about what you are',
+    'owed comes from accounts@crayonauts.com.',
     '',
     '- Crayonauts'
   ].join('\n');
@@ -273,7 +286,8 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent }) {
     '<p style="font-size:13px;color:#6B6357;">One more thing: you&rsquo;ll get a separate invite to set '
     + 'up how you get paid. That&rsquo;s where your tax form and your bank details go &mdash; please '
     + 'don&rsquo;t send either of those by email.</p>',
-    '<p style="font-size:13px;color:#6B6357;">Any questions, just reply to this.</p>',
+    '<p style="font-size:13px;color:#6B6357;">Anything about setting up, just reply to this. '
+    + 'Anything about what you&rsquo;re owed comes from accounts@crayonauts.com.</p>',
     '</div>'
   ].join('');
   return { subject, text, html };
