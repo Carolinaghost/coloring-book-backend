@@ -354,6 +354,197 @@ async function resolvePromotionCode(code) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Creators
+//
+// A creator's code carries NO discount. It hangs off the `creatortrack`
+// coupon, which is 0.01% off - small enough to round to nothing on any price
+// we sell, and the smallest number Stripe will accept, because Stripe has no
+// zero-discount coupon and a promotion code must hang off some coupon. The
+// code exists to put the creator's name on the sale, not to cut the price.
+//
+// That is also why this endpoint can be open to the public. Somebody spamming
+// the form gains nothing - there is no discount to harvest - so the only cost
+// of abuse is junk promotion codes cluttering Stripe, which the per-visitor
+// cap below keeps to a nuisance rather than a problem.
+const CREATOR_COUPON = process.env.CREATOR_COUPON || 'creatortrack';
+const CREATOR_RATE_PERCENT = parseInt(process.env.CREATOR_RATE_PERCENT, 10) || 25;
+const CREATOR_SIGNUPS_PER_IP = parseInt(process.env.CREATOR_SIGNUPS_PER_IP, 10) || 3;
+
+// Stripe matches promotion codes exactly, and the site upper-cases whatever a
+// customer types, so a code has to be A-Z and digits with nothing else in it.
+// Accents, spaces and punctuation are stripped rather than rejected: somebody
+// called "José Peña" should get JOSEPENA, not an error message.
+function cleanCreatorCode(raw) {
+  return String(raw || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toUpperCase().replace(/[^A-Z0-9]/g, '')
+    .slice(0, 20);
+}
+
+// Reserved so a creator can never be handed a code that means something else
+// to the checkout - FREE- and OWNER- are the free-book codes.
+function reservedCreatorCode(code) {
+  return /^(FREE|OWNER|TEST|ADMIN|CRAYONAUTS)/.test(code);
+}
+
+// Picks a code nobody is using. Tries their choice first, because a creator
+// who asked for one and got JERRELL2 will use JERRELL2 and mean JERRELL.
+async function freeCreatorCode(wanted) {
+  const base = cleanCreatorCode(wanted);
+  if (base.length >= 3 && !reservedCreatorCode(base) && !(await db.codeTaken(base))
+      && !(await resolvePromotionCode(base))) {
+    return base;
+  }
+  const stem = (base.length >= 3 ? base : 'CREATOR').slice(0, 14);
+  for (let i = 0; i < 12; i++) {
+    const suffix = Math.random().toString(36).replace(/[^a-z0-9]/g, '').slice(0, 4).toUpperCase();
+    const candidate = stem + suffix;
+    if (candidate.length < 4 || reservedCreatorCode(candidate)) continue;
+    if (await db.codeTaken(candidate)) continue;
+    if (await resolvePromotionCode(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+// Good enough to catch a typo, deliberately not RFC 5322. A creator who gets
+// this wrong never receives their code, so the cost of being slightly strict
+// is a form they retype and the cost of being loose is silence.
+function looksLikeEmail(v) {
+  const e = String(v || '').trim();
+  return e.length >= 5 && e.length <= 254 && /^[^\s@]+@[^\s@.]+\.[^\s@]+$/.test(e);
+}
+
+app.post('/creators', async (req, res) => {
+  const name = String(req.body.name || '').trim().slice(0, 80);
+  const email = String(req.body.email || '').trim().toLowerCase().slice(0, 254);
+  const platform = String(req.body.platform || '').trim().slice(0, 40);
+  const handle = String(req.body.handle || '').trim().slice(0, 80);
+  const followers = String(req.body.followers || '').trim().slice(0, 40);
+
+  if (name.length < 2) return res.status(400).json({ error: 'Tell us your name.' });
+  if (!looksLikeEmail(email)) return res.status(400).json({ error: 'That email does not look right.' });
+  if (handle.length < 2) return res.status(400).json({ error: 'Tell us where you post.' });
+
+  // Signing up twice returns the code they already have. This is checked before
+  // the quota so that somebody who fills the form again - the commonest reason
+  // being that they lost the email - is helped rather than throttled.
+  try {
+    const existing = await db.getCreatorByEmail(email);
+    if (existing) {
+      return res.json({
+        code: existing.code,
+        link: SITE_URL + '?c=' + encodeURIComponent(existing.code.toLowerCase()),
+        ratePercent: existing.ratePercent,
+        alreadySignedUp: true
+      });
+    }
+  } catch (err) {
+    console.error('Could not look up creator:', err.message);
+    return res.status(500).json({ error: 'Could not sign you up just now. Try again in a minute.' });
+  }
+
+  try {
+    const quota = await db.takeSignupQuota(clientIp(req), previewDay(), CREATOR_SIGNUPS_PER_IP);
+    if (!quota.allowed) {
+      return res.status(429).json({ error: 'That is enough sign-ups from here today. Email support@crayonauts.com.' });
+    }
+  } catch (err) {
+    // Fail closed, unlike the preview quota. A preview that is refused costs a
+    // sale; a sign-up that is refused costs a minute. The asymmetry runs the
+    // other way here, so when the counter is broken nobody gets a code.
+    console.error('Could not count creator sign-ups:', err.message);
+    return res.status(503).json({ error: 'Could not sign you up just now. Try again in a minute.' });
+  }
+
+  if (!STRIPE_SECRET_KEY) {
+    console.error('Creator sign-up attempted with no Stripe key.');
+    return res.status(503).json({ error: 'Could not sign you up just now. Try again in a minute.' });
+  }
+
+  const code = await freeCreatorCode(req.body.codeWord || name);
+  if (!code) {
+    console.error('Could not find a free creator code for', email);
+    return res.status(503).json({ error: 'Could not sign you up just now. Try again in a minute.' });
+  }
+
+  // Stripe first, database second. A code that exists in Stripe with no row
+  // here is an orphan somebody has to tidy up; a row here with no code in
+  // Stripe is a creator whose link silently does nothing, which is worse.
+  let promoId = '';
+  try {
+    const form = new URLSearchParams();
+    form.append('coupon', CREATOR_COUPON);
+    form.append('code', code);
+    form.append('metadata[creator_name]', name);
+    form.append('metadata[creator_email]', email);
+    form.append('metadata[rate_percent]', String(CREATOR_RATE_PERCENT));
+    const resp = await fetch('https://api.stripe.com/v1/promotion_codes', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: form
+    });
+    const body = await resp.json();
+    if (!resp.ok || !body.id) {
+      console.error('Stripe refused the creator code:', body && body.error && body.error.message);
+      return res.status(502).json({ error: 'Could not sign you up just now. Try again in a minute.' });
+    }
+    promoId = body.id;
+  } catch (err) {
+    console.error('Could not create the creator code:', err.message);
+    return res.status(502).json({ error: 'Could not sign you up just now. Try again in a minute.' });
+  }
+
+  let creator;
+  try {
+    creator = await db.saveCreator({
+      code, name, email, platform, handle, followers,
+      ratePercent: CREATOR_RATE_PERCENT, promoId
+    });
+  } catch (err) {
+    console.error('Could not save creator:', err.message);
+    return res.status(500).json({ error: 'Could not sign you up just now. Try again in a minute.' });
+  }
+
+  const link = SITE_URL + '?c=' + encodeURIComponent(code.toLowerCase());
+
+  // The reply does not wait on the email. They are looking at their code on
+  // the page already; a slow mail server must not make the form look broken.
+  res.json({ code, link, ratePercent: CREATOR_RATE_PERCENT, alreadySignedUp: false });
+
+  if (!mailer.configured) {
+    console.warn('No mailer configured - creator ' + code + ' got no welcome email.');
+    return;
+  }
+  try {
+    const mail = mailer.creatorWelcomeEmail({ name, code, siteUrl: SITE_URL, ratePercent: CREATOR_RATE_PERCENT });
+    await mailer.sendMail({ to: email, subject: mail.subject, text: mail.text, html: mail.html });
+    await db.markCreatorWelcomed(creator.id);
+    console.log('Creator ' + code + ' signed up and welcomed.');
+  } catch (err) {
+    // Not fatal: the code exists, the page showed it, and welcomed_at staying
+    // null is the record that somebody needs to resend it.
+    console.error('Creator ' + code + ' has no welcome email:', err.message);
+  }
+});
+
+// Who has signed up, for Jonathan. Includes whether the welcome email went,
+// because a creator who never got theirs looks identical to one who did until
+// somebody checks.
+app.get('/creators', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    res.json({ creators: await db.listCreators() });
+  } catch (err) {
+    console.error('Could not list creators:', err.message);
+    res.status(500).json({ error: 'Could not load creators.' });
+  }
+});
+
 // Creates a Stripe Checkout Session for an order and returns the URL to send
 // the customer to. Called with the order id and the access token we handed the
 // browser when the order was created.
@@ -2012,5 +2203,5 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, previewDay, clientIp, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, previewDay, clientIp, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
