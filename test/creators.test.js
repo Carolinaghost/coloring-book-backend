@@ -157,7 +157,10 @@ async function main() {
     check('the form is accepted', first.status, 200);
     check('and gives back a code', first.body.code, 'JERRELLCRUMP');
     check('and a link that carries it', first.body.link, 'https://crayonauts.com?c=jerrellcrump');
-    check('at the standard rate', first.body.ratePercent, 25);
+    // 20 is the standard rate. Jerrell's 25 is a negotiated exception and lives
+    // in the payout report's --rates flag, not here. If this ever reads 25 again
+    // the form is promising a rate the Thursday report will not pay.
+    check('at the standard rate, which is 20 and not Jerrell\'s 25', first.body.ratePercent, 20);
     check('and does not claim they were already signed up', first.body.alreadySignedUp, false);
 
     check('exactly one code was created in Stripe', stripeCreates.length, 1);
@@ -165,7 +168,7 @@ async function main() {
     check('against the tracking coupon, not a discount one', stripeCreates[0].coupon, 'creatortrack');
     check('sent the way the current API spells it', stripeCreates[0].promotionType, 'coupon');
     check('and not the flat spelling Stripe now rejects', stripeCreates[0].flatCoupon, null);
-    check('with the rate recorded on the code itself', stripeCreates[0].rate, '25');
+    check('with the rate recorded on the code itself', stripeCreates[0].rate, '20');
     check('and the creator reachable from Stripe alone', stripeCreates[0].email, 'jerrell@example.com');
 
     await settle();
