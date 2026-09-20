@@ -215,4 +215,76 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
   return { subject, text, html };
 }
 
-module.exports = { sendMail, orderReadyEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
+// The one email a new creator gets. Everything they need to start earning is
+// in it, and nothing they have to fill in is: bank details and the W-9 are
+// collected by the payment service, in a separate invite, because a routing
+// number emailed back as an attachment sits in an inbox forever.
+//
+// The code is printed AND the link is printed. They are not the same thing to
+// a creator: the link is what goes in a bio, the code is what goes in a
+// caption somebody reads out loud. Give one and not the other and half the
+// audience has no way through.
+function creatorWelcomeEmail({ name, code, siteUrl, ratePercent }) {
+  const link = siteUrl + '?c=' + encodeURIComponent(code.toLowerCase());
+  const first = String(name || '').trim().split(/\s+/)[0] || 'there';
+  const rate = Number(ratePercent) || 25;
+  const subject = "You're in - here's your Crayonauts code";
+  const text = [
+    'Hi ' + first + ',',
+    '',
+    "You're set up as a Crayonauts creator. Here is everything you need.",
+    '',
+    'Your code:  ' + code,
+    'Your link:  ' + link,
+    '',
+    'Either one works. The link is for your bio; the code is for when somebody',
+    'is reading your caption or listening to you say it out loud. Both track',
+    'back to you, and neither changes the price your audience pays.',
+    '',
+    'You earn ' + rate + '% of every book bought through them.',
+    '',
+    'The pay week runs Thursday morning to Wednesday night, US Eastern. What',
+    'came in during that week is totalled up the following Thursday.',
+    '',
+    'One more thing: you will get a separate invite to set up how you get paid.',
+    'That is where your tax form and your bank details go - please do not send',
+    'either of those by email.',
+    '',
+    'Any questions, just reply to this.',
+    '',
+    '- Crayonauts'
+  ].join('\n');
+  const html = [
+    '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
+    '<h2 style="color:#2F5FA8;">You&rsquo;re in, ' + escapeHtml(first) + '</h2>',
+    '<p>You&rsquo;re set up as a Crayonauts creator. Here is everything you need.</p>',
+    '<div style="background:#F6F4EF;border-radius:10px;padding:16px 18px;margin:18px 0;">',
+    '<p style="margin:0 0 6px;font-size:13px;color:#6B6357;">Your code</p>',
+    '<p style="margin:0 0 14px;font-size:22px;font-weight:bold;letter-spacing:1px;">' + escapeHtml(code) + '</p>',
+    '<p style="margin:0 0 6px;font-size:13px;color:#6B6357;">Your link</p>',
+    '<p style="margin:0;"><a href="' + link + '">' + escapeHtml(link) + '</a></p>',
+    '</div>',
+    '<p>Either one works. The link is for your bio; the code is for when somebody is reading your '
+    + 'caption or listening to you say it out loud. Both track back to you, and neither changes the '
+    + 'price your audience pays.</p>',
+    '<p style="font-size:17px;"><strong>You earn ' + rate + '% of every book bought through them.</strong></p>',
+    '<p>The pay week runs Thursday morning to Wednesday night, US Eastern. What came in during that '
+    + 'week is totalled up the following Thursday.</p>',
+    '<p style="font-size:13px;color:#6B6357;">One more thing: you&rsquo;ll get a separate invite to set '
+    + 'up how you get paid. That&rsquo;s where your tax form and your bank details go &mdash; please '
+    + 'don&rsquo;t send either of those by email.</p>',
+    '<p style="font-size:13px;color:#6B6357;">Any questions, just reply to this.</p>',
+    '</div>'
+  ].join('');
+  return { subject, text, html };
+}
+
+// Only ever wraps values that came off a form, so it covers the five that
+// matter and does not pretend to be a sanitiser.
+function escapeHtml(v) {
+  return String(v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+module.exports = { sendMail, orderReadyEmail, creatorWelcomeEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };

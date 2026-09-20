@@ -17,6 +17,8 @@ const usingPostgres = Boolean(DATABASE_URL);
 let pool = null;
 let memoryOrders = [];
 const memoryPreviewQuota = new Map();
+const memorySignupQuota = new Map();
+const memoryCreators = [];
 let memoryEvents = [];
 let nextMemoryId = 1;
 let nextMemoryEventId = 1;
@@ -136,6 +138,37 @@ const CREATE_EVENTS_INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS events_created_at_idx ON events (created_at DESC);
 `;
 
+// Creators. One row per person who signed up through the "become a creator"
+// page, keyed on the Stripe promotion code they were given, so the code the
+// customer types and the person we owe money to are never two separate lists
+// that can drift apart.
+//
+// Email is UNIQUE on purpose. Somebody who fills the form twice - and they
+// will, because nothing about a form stops them - must come back with the code
+// they already have, not a second code splitting their own sales in half.
+const CREATE_CREATORS_SQL = `
+  CREATE TABLE IF NOT EXISTS creators (
+    id           SERIAL      PRIMARY KEY,
+    code         TEXT        NOT NULL UNIQUE,
+    name         TEXT        NOT NULL,
+    email        TEXT        NOT NULL UNIQUE,
+    platform     TEXT        NOT NULL DEFAULT '',
+    handle       TEXT        NOT NULL DEFAULT '',
+    followers    TEXT        NOT NULL DEFAULT '',
+    rate_percent INTEGER     NOT NULL DEFAULT 25,
+    promo_id     TEXT        NOT NULL DEFAULT '',
+    signed_up_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    welcomed_at  TIMESTAMPTZ
+  );
+
+  CREATE TABLE IF NOT EXISTS signup_quota (
+    ip   TEXT    NOT NULL,
+    day  DATE    NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ip, day)
+  );
+`;
+
 // Columns added after the first release. Existing deployments already have an
 // orders table, so CREATE TABLE IF NOT EXISTS alone would silently skip these.
 const MIGRATIONS = [
@@ -191,6 +224,7 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_PAGES_SQL);
     await pool.query(CREATE_EVENTS_SQL);
     await pool.query(CREATE_EVENTS_INDEX_SQL);
+    await pool.query(CREATE_CREATORS_SQL);
     ready = true;
     lastError = null;
     console.log('Connected to Postgres. Orders table is ready.');
@@ -1023,6 +1057,106 @@ async function purgeOldPreviewQuota(days = 7) {
   return rowCount;
 }
 
+// The same one-statement trick preview_quota uses, for the creator form. The
+// codes it hands out carry no discount, so somebody spamming the form gains
+// nothing - but they could still fill Stripe with junk promotion codes, and a
+// list of promotion codes nobody recognises is a list nobody can audit.
+async function takeSignupQuota(ip, day, limit) {
+  if (!usingPostgres) {
+    const key = `${ip}|${day}`;
+    const used = (memorySignupQuota.get(key) || 0) + 1;
+    if (used > limit) return { allowed: false, used: limit };
+    memorySignupQuota.set(key, used);
+    return { allowed: true, used };
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO signup_quota (ip, day, used) VALUES ($1, $2, 1)
+       ON CONFLICT (ip, day) DO UPDATE SET used = signup_quota.used + 1
+       WHERE signup_quota.used < $3
+     RETURNING used`,
+    [ip, day, limit]
+  );
+  return rows.length ? { allowed: true, used: rows[0].used } : { allowed: false, used: limit };
+}
+
+function rowToCreator(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    email: row.email,
+    platform: row.platform || '',
+    handle: row.handle || '',
+    followers: row.followers || '',
+    ratePercent: row.rate_percent,
+    promoId: row.promo_id || '',
+    signedUpAt: row.signed_up_at,
+    welcomedAt: row.welcomed_at || null
+  };
+}
+
+async function getCreatorByEmail(email) {
+  const wanted = String(email || '').trim().toLowerCase();
+  if (!wanted) return null;
+  if (!usingPostgres) {
+    return rowToCreator(memoryCreators.find((c) => c.email === wanted) || null);
+  }
+  const { rows } = await pool.query('SELECT * FROM creators WHERE email = $1', [wanted]);
+  return rows[0] ? rowToCreator(rows[0]) : null;
+}
+
+async function codeTaken(code) {
+  const wanted = String(code || '').trim().toUpperCase();
+  if (!wanted) return true;
+  if (!usingPostgres) return memoryCreators.some((c) => c.code === wanted);
+  const { rows } = await pool.query('SELECT 1 FROM creators WHERE code = $1', [wanted]);
+  return rows.length > 0;
+}
+
+// Written only after Stripe has said yes, so a row here always has a real
+// promotion code behind it. The reverse - a Stripe code with no row - is the
+// safe direction to fail in: it costs an orphaned code, not a creator who
+// thinks they are signed up and is not.
+async function saveCreator(c) {
+  const row = {
+    code: String(c.code).toUpperCase(),
+    name: String(c.name),
+    email: String(c.email).trim().toLowerCase(),
+    platform: c.platform || '',
+    handle: c.handle || '',
+    followers: c.followers || '',
+    rate_percent: Number(c.ratePercent) || 25,
+    promo_id: c.promoId || ''
+  };
+  if (!usingPostgres) {
+    const saved = { id: memoryCreators.length + 1, signed_up_at: new Date(), welcomed_at: null, ...row };
+    memoryCreators.push({ ...saved, email: row.email, code: row.code });
+    return rowToCreator(saved);
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO creators (code, name, email, platform, handle, followers, rate_percent, promo_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+    [row.code, row.name, row.email, row.platform, row.handle, row.followers, row.rate_percent, row.promo_id]
+  );
+  return rowToCreator(rows[0]);
+}
+
+async function markCreatorWelcomed(id) {
+  if (!usingPostgres) {
+    const c = memoryCreators.find((x) => x.id === Number(id));
+    if (c) c.welcomed_at = new Date();
+    return;
+  }
+  await pool.query('UPDATE creators SET welcomed_at = NOW() WHERE id = $1', [Number(id)]);
+}
+
+async function listCreators() {
+  if (!usingPostgres) return memoryCreators.map(rowToCreator);
+  const { rows } = await pool.query('SELECT * FROM creators ORDER BY id DESC');
+  return rows.map(rowToCreator);
+}
+
 module.exports = {
   // Scripts that need raw SQL (scripts/reencode-pages.js) reach the pool here.
   // Null when running on the in-memory store, which those scripts check for.
@@ -1030,6 +1164,12 @@ module.exports = {
   usingPostgres,
   takePreviewQuota,
   purgeOldPreviewQuota,
+  takeSignupQuota,
+  getCreatorByEmail,
+  codeTaken,
+  saveCreator,
+  markCreatorWelcomed,
+  listCreators,
   status,
   initDb,
   saveOrder,
