@@ -22,6 +22,10 @@
 
 process.env.STRIPE_SECRET_KEY = 'sk_test_not_a_real_key';
 process.env.SITE_URL = 'https://crayonauts.com';
+// Raised for this file only. The real default is 1 a day per visitor, which
+// is asserted on its own below - the flow tests need several sign-ups from
+// one address to exercise name clashes and repeat sign-ups at all.
+process.env.CREATOR_SIGNUPS_PER_IP = '3';
 delete process.env.DATABASE_URL;   // exercise the in-memory store
 
 const db = require('../db.js');
@@ -46,6 +50,7 @@ function check(label, got, want) {
 // Every promotion code Stripe was asked to create, so the test can say what
 // coupon each one hung off rather than only that one was made.
 const stripeCreates = [];
+const freeCreates = [];
 const stripeCodes = new Set();
 const realFetch = global.fetch;
 
@@ -66,6 +71,19 @@ function stubStripe() {
       }
       const form = new URLSearchParams(opts.body.toString());
       const code = form.get('code');
+      if (form.get('promotion[coupon]') === 'freebook100') {
+        if (stripeCodes.has(code)) {
+          return { ok: false, json: async () => ({ error: { message: 'code already exists' } }) };
+        }
+        stripeCodes.add(code);
+        freeCreates.push({
+          code,
+          coupon: form.get('promotion[coupon]'),
+          maxRedemptions: form.get('max_redemptions'),
+          email: form.get('metadata[creator_email]')
+        });
+        return { ok: true, json: async () => ({ id: 'promo_' + code }) };
+      }
       if (stripeCodes.has(code)) {
         return { ok: false, json: async () => ({ error: { message: 'code already exists' } }) };
       }
@@ -171,11 +189,22 @@ async function main() {
     check('with the rate recorded on the code itself', stripeCreates[0].rate, '20');
     check('and the creator reachable from Stripe alone', stripeCreates[0].email, 'jerrell@example.com');
 
+    console.log('\nThe free book the proposal promises');
+    // The proposal leads with "a free book on us". Before this existed, the
+    // first thing a creator did was notice it had not arrived.
+    check('a free book code was minted', freeCreates.length, 1);
+    check('against the 100% off coupon', freeCreates[0].coupon, 'freebook100');
+    check('and it can only be spent once', freeCreates[0].maxRedemptions, '1');
+    check('it is recognisable as a free book code', /^FREE-[A-Z0-9]{6}$/.test(freeCreates[0].code), true);
+    check('and it is not the tracking code', freeCreates[0].code === first.body.code, false);
+    check('the form hands it straight back', first.body.freeCode, freeCreates[0].code);
+
     await settle();
     check('the welcome email went', sent.length, 1);
     check('to the address they gave', sent[0].to, 'jerrell@example.com');
     check('with the code in it', sent[0].text.includes('JERRELLCRUMP'), true);
     check('and the link in it', sent[0].text.includes('?c=jerrellcrump'), true);
+    check('and the free book code in it', sent[0].text.includes(freeCreates[0].code), true);
     // The pay week and the pay day are two different things and the proposal,
     // the creator page and this email all have to agree on both. The week
     // closes Wednesday night; the money moves the Friday after.
@@ -204,6 +233,10 @@ async function main() {
     check('and gets the code they already have', again.body.code, 'JERRELLCRUMP');
     check('and is told so', again.body.alreadySignedUp, true);
     check('no second code was created', stripeCreates.length, 1);
+    // Somebody back because they lost the email gets their own free book code
+    // again, not a second free book.
+    check('and the free book code they already had', again.body.freeCode, freeCreates[0].code);
+    check('with no second free book minted', freeCreates.length, 1);
     await settle();
     check('and no second welcome email', sent.length, 1);
 
@@ -226,7 +259,23 @@ async function main() {
     check('no idea where they post', noHandle.status, 400);
     check('none of them touched Stripe', stripeCreates.length, 2);
 
-    console.log('\nSomebody hammering the form');
+    console.log('\nWhat the form gives away in a day');
+  // A sign-up used to be worth nothing to steal - the tracking code carries no
+  // discount. The free book changed that: every sign-up now mints a real
+  // 100%-off code, so the caps are what stand between the form and somebody
+  // farming free books with throwaway addresses.
+  {
+    const saved = process.env.CREATOR_SIGNUPS_PER_IP;
+    delete process.env.CREATOR_SIGNUPS_PER_IP;
+    delete require.cache[require.resolve('../server.js')];
+    const fresh = require('../server.js');
+    check('one sign-up a day per visitor, by default', fresh.CREATOR_SIGNUPS_PER_IP, 1);
+    check('and a ceiling on free books across everybody', fresh.CREATOR_FREE_BOOKS_PER_DAY, 10);
+    process.env.CREATOR_SIGNUPS_PER_IP = saved;
+    delete require.cache[require.resolve('../server.js')];
+  }
+
+  console.log('\nSomebody hammering the form');
     // Three a day per visitor. Two of those are already spent above by the
     // two sign-ups that reached Stripe; the refusals never counted.
     const third = await signUp(port, { name: 'Third Person', email: 't3@example.com', handle: '@t3' });

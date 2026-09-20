@@ -374,7 +374,22 @@ const CREATOR_COUPON = process.env.CREATOR_COUPON || 'creatortrack';
 // creator a rate the Thursday report does not pay them, and the first anyone
 // would hear of it is a creator who counted.
 const CREATOR_RATE_PERCENT = parseInt(process.env.CREATOR_RATE_PERCENT, 10) || 20;
-const CREATOR_SIGNUPS_PER_IP = parseInt(process.env.CREATOR_SIGNUPS_PER_IP, 10) || 3;
+// One a day per visitor, not three. That number was set when a creator code
+// was worth nothing to steal - it carries no discount. The free book below
+// changes that: every sign-up now mints a real 100%-off code, so a sign-up is
+// worth an actual book, and the form has to be rationed like one.
+const CREATOR_SIGNUPS_PER_IP = parseInt(process.env.CREATOR_SIGNUPS_PER_IP, 10) || 1;
+
+// The free book the proposal leads with. Without this a creator's first
+// experience is noticing that the thing they were promised did not arrive.
+// One use, no expiry - "no strings" is what the proposal says, and a code
+// that quietly dies is a string.
+const CREATOR_FREE_COUPON = process.env.CREATOR_FREE_COUPON || 'freebook100';
+// A ceiling across everybody, because the per-visitor cap is per visitor and
+// addresses are cheap. This is the number of free books the form can give away
+// in a day no matter who asks. Sign-ups past it still work and still get their
+// tracking code; they just do not get a free book, and the log says who.
+const CREATOR_FREE_BOOKS_PER_DAY = parseInt(process.env.CREATOR_FREE_BOOKS_PER_DAY, 10) || 10;
 // The three mailboxes do three jobs and must not bleed into each other.
 // support@ belongs to customers - a parent whose book has not arrived. admin@
 // sets creators up. accounts@ is what they get paid. The welcome mail goes out
@@ -419,6 +434,57 @@ async function freeCreatorCode(wanted) {
   return null;
 }
 
+// FREE-XXXXXX, matching the codes already in the dashboard so a free book code
+// is recognisable at a glance as one. Six characters rather than the four the
+// hand-made ones use: these are minted without anyone watching, and a
+// collision here hands two people the same single-use code, where the first to
+// spend it takes the other's book.
+function freeBookCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < 6; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return 'FREE-' + out;
+}
+
+// Best effort on purpose. If Stripe will not mint the free code, the creator
+// still gets their tracking code and their link - the part that earns them
+// money - and free_code stays empty, which is what tells somebody to send one
+// by hand. Failing the whole sign-up over a free book would be the wrong way
+// round.
+async function mintFreeBookCode({ name, email }) {
+  if (!STRIPE_SECRET_KEY) return null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = freeBookCode();
+    if (await resolvePromotionCode(code)) continue;
+    try {
+      const form = new URLSearchParams();
+      form.append('promotion[type]', 'coupon');
+      form.append('promotion[coupon]', CREATOR_FREE_COUPON);
+      form.append('code', code);
+      form.append('max_redemptions', '1');
+      form.append('metadata[purpose]', 'creator free book');
+      form.append('metadata[creator_name]', name);
+      form.append('metadata[creator_email]', email);
+      const resp = await fetch('https://api.stripe.com/v1/promotion_codes', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: form
+      });
+      const body = await resp.json();
+      if (resp.ok && body.id) return { code, promoId: body.id };
+      console.error('Stripe refused a free book code:', body && body.error && body.error.message);
+      return null;
+    } catch (err) {
+      console.error('Could not mint a free book code:', err.message);
+      return null;
+    }
+  }
+  return null;
+}
+
 // Good enough to catch a typo, deliberately not RFC 5322. A creator who gets
 // this wrong never receives their code, so the cost of being slightly strict
 // is a form they retype and the cost of being loose is silence.
@@ -448,6 +514,9 @@ app.post('/creators', async (req, res) => {
         code: existing.code,
         link: SITE_URL + '?c=' + encodeURIComponent(existing.code.toLowerCase()),
         ratePercent: existing.ratePercent,
+        // Their own free code, not a new one. Somebody back here because they
+        // lost the email must not be handed a second free book.
+        freeCode: existing.freeCode || '',
         alreadySignedUp: true
       });
     }
@@ -516,11 +585,24 @@ app.post('/creators', async (req, res) => {
     return res.status(502).json({ error: 'Could not sign you up just now. Try again in a minute.' });
   }
 
+  // The day's ceiling on free books, counted under a key no visitor can be.
+  // A sign-up past it is still a sign-up - they keep their tracking code.
+  let free = null;
+  try {
+    const room = await db.takeSignupQuota('*free-books*', previewDay(), CREATOR_FREE_BOOKS_PER_DAY);
+    if (room.allowed) free = await mintFreeBookCode({ name, email });
+    else console.warn('Free book ceiling reached for today; ' + code + ' signed up without one.');
+  } catch (err) {
+    console.error('Could not count free books, skipping this one -', err.message);
+  }
+  if (!free) console.warn('Creator ' + code + ' has no free book code. Send one by hand.');
+
   let creator;
   try {
     creator = await db.saveCreator({
       code, name, email, platform, handle, followers,
-      ratePercent: CREATOR_RATE_PERCENT, promoId
+      ratePercent: CREATOR_RATE_PERCENT, promoId,
+      freeCode: free ? free.code : '', freePromoId: free ? free.promoId : ''
     });
   } catch (err) {
     console.error('Could not save creator:', err.message);
@@ -531,14 +613,21 @@ app.post('/creators', async (req, res) => {
 
   // The reply does not wait on the email. They are looking at their code on
   // the page already; a slow mail server must not make the form look broken.
-  res.json({ code, link, ratePercent: CREATOR_RATE_PERCENT, alreadySignedUp: false });
+  res.json({
+    code, link, ratePercent: CREATOR_RATE_PERCENT,
+    freeCode: free ? free.code : '',
+    alreadySignedUp: false
+  });
 
   if (!mailer.configured) {
     console.warn('No mailer configured - creator ' + code + ' got no welcome email.');
     return;
   }
   try {
-    const mail = mailer.creatorWelcomeEmail({ name, code, siteUrl: SITE_URL, ratePercent: CREATOR_RATE_PERCENT });
+    const mail = mailer.creatorWelcomeEmail({
+      name, code, siteUrl: SITE_URL, ratePercent: CREATOR_RATE_PERCENT,
+      freeCode: free ? free.code : ''
+    });
     await mailer.sendMail({
       to: email, subject: mail.subject, text: mail.text, html: mail.html,
       from: CREATOR_MAIL_FROM, replyTo: CREATOR_MAIL_FROM
@@ -2223,5 +2312,5 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, previewDay, clientIp, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, previewDay, clientIp, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };

@@ -146,6 +146,14 @@ const CREATE_EVENTS_INDEX_SQL = `
 // Email is UNIQUE on purpose. Somebody who fills the form twice - and they
 // will, because nothing about a form stops them - must come back with the code
 // they already have, not a second code splitting their own sales in half.
+// The creators table already exists on the live database without these, so
+// CREATE TABLE IF NOT EXISTS would silently skip them. Kept separate from
+// MIGRATIONS because that array runs before the creators table is made.
+const CREATOR_MIGRATIONS = [
+  "ALTER TABLE creators ADD COLUMN IF NOT EXISTS free_code TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE creators ADD COLUMN IF NOT EXISTS free_promo_id TEXT NOT NULL DEFAULT ''"
+];
+
 const CREATE_CREATORS_SQL = `
   CREATE TABLE IF NOT EXISTS creators (
     id           SERIAL      PRIMARY KEY,
@@ -157,6 +165,11 @@ const CREATE_CREATORS_SQL = `
     followers    TEXT        NOT NULL DEFAULT '',
     rate_percent INTEGER     NOT NULL DEFAULT 25,
     promo_id     TEXT        NOT NULL DEFAULT '',
+    -- The single-use 100%-off code that makes good on the free book the
+    -- proposal promises. Empty means they never got one, which is a thing
+    -- somebody has to fix by hand rather than a thing to leave unnoticed.
+    free_code    TEXT        NOT NULL DEFAULT '',
+    free_promo_id TEXT       NOT NULL DEFAULT '',
     signed_up_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     welcomed_at  TIMESTAMPTZ
   );
@@ -225,6 +238,7 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_EVENTS_SQL);
     await pool.query(CREATE_EVENTS_INDEX_SQL);
     await pool.query(CREATE_CREATORS_SQL);
+    for (const sql of CREATOR_MIGRATIONS) await pool.query(sql);
     ready = true;
     lastError = null;
     console.log('Connected to Postgres. Orders table is ready.');
@@ -1091,6 +1105,8 @@ function rowToCreator(row) {
     followers: row.followers || '',
     ratePercent: row.rate_percent,
     promoId: row.promo_id || '',
+    freeCode: row.free_code || '',
+    freePromoId: row.free_promo_id || '',
     signedUpAt: row.signed_up_at,
     welcomedAt: row.welcomed_at || null
   };
@@ -1120,6 +1136,8 @@ async function codeTaken(code) {
 // thinks they are signed up and is not.
 async function saveCreator(c) {
   const row = {
+    free_code: String(c.freeCode || '').toUpperCase(),
+    free_promo_id: c.freePromoId || '',
     code: String(c.code).toUpperCase(),
     name: String(c.name),
     email: String(c.email).trim().toLowerCase(),
@@ -1135,9 +1153,11 @@ async function saveCreator(c) {
     return rowToCreator(saved);
   }
   const { rows } = await pool.query(
-    `INSERT INTO creators (code, name, email, platform, handle, followers, rate_percent, promo_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-    [row.code, row.name, row.email, row.platform, row.handle, row.followers, row.rate_percent, row.promo_id]
+    `INSERT INTO creators (code, name, email, platform, handle, followers, rate_percent,
+                           promo_id, free_code, free_promo_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+    [row.code, row.name, row.email, row.platform, row.handle, row.followers, row.rate_percent,
+     row.promo_id, row.free_code, row.free_promo_id]
   );
   return rowToCreator(rows[0]);
 }
