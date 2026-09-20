@@ -19,7 +19,8 @@
 // Nothing here touches Stripe. The fetch is a stub.
 
 const {
-  promoIdFromSession, attribute, tally, listAll, csvCell, parseRates, main: runMain
+  promoIdFromSession, attribute, tally, listAll, csvCell, parseRates,
+  payPeriod, windowLabel, main: runMain
 } = require('../scripts/affiliate-report.js');
 
 let pass = 0;
@@ -49,10 +50,11 @@ function errorFrom(fn) {
 
 // Stripe, as far as the report is concerned: the promotion code list and the
 // checkout sessions, and nothing else answers.
-function stripeStub({ codes, sessions, coupons, byCoupon }) {
+function stripeStub({ codes, sessions, coupons, byCoupon, asked }) {
   return async (url) => {
     const at = new URL(url);
     const path = at.pathname;
+    if (asked && path === '/v1/checkout/sessions') asked.push(at.searchParams);
     // /v1/promotion_codes?coupon=co_1 is a different question from
     // /v1/promotion_codes, and answering both with the same list would hide
     // exactly the bug the coupon lookup exists to fix.
@@ -71,13 +73,13 @@ function stripeStub({ codes, sessions, coupons, byCoupon }) {
 // printed. Checking the numbers the report actually prints is the point -
 // resolving the rate correctly and then printing owed from the old single
 // rate would pass any test that only looked at the map.
-async function runReport(argv, fixture) {
+async function runReport(argv, fixture, now) {
   const out = [], warn = [];
   const realLog = console.log, realWarn = console.warn;
   console.log = (...a) => out.push(a.join(' '));
   console.warn = (...a) => warn.push(a.join(' '));
   try {
-    await runMain({ argv, fetch: stripeStub(fixture), key: 'sk_test' });
+    await runMain({ argv, fetch: stripeStub(fixture), key: 'sk_test', now });
   } finally {
     console.log = realLog;
     console.warn = realWarn;
@@ -292,6 +294,52 @@ async function main() {
     /between 0 and 100/.test(
       (await runReport(['--rates', 'JERRELL=250'], FIXTURE).then(() => null, (e) => e.message)) || ''),
     true);
+
+  console.log('\nThe pay week the creators were actually promised');
+
+  const TZ = 'America/New_York';
+  const label = (at) => {
+    const p = payPeriod(new Date(at), TZ);
+    return windowLabel(p.start, p.end, TZ);
+  };
+
+  // 08:00 Thursday in New York is 12:00 UTC while daylight time is on.
+  check('the Thursday 8am run closes the week that just ended',
+    label('2026-09-24T12:00:00Z'), 'Thu, Sep 17 00:00 to Wed, Sep 23 23:59');
+  // Running it late must not silently pay a different week.
+  check('running it on Friday instead reports the same week',
+    label('2026-09-25T12:00:00Z'), 'Thu, Sep 17 00:00 to Wed, Sep 23 23:59');
+  check('and still the same on Wednesday night, one hour before close',
+    label('2026-09-30T23:00:00Z'), 'Thu, Sep 17 00:00 to Wed, Sep 23 23:59');
+  check('five minutes past midnight Thursday, it has rolled on',
+    label('2026-10-01T04:05:00Z'), 'Thu, Sep 24 00:00 to Wed, Sep 30 23:59');
+
+  // The week containing the end of US daylight saving is 169 hours long. A
+  // window built from a flat seven-times-86400 would end an hour early and
+  // drop an hour of Wednesday night sales.
+  const dst = payPeriod(new Date('2026-11-05T13:00:00Z'), TZ);
+  check('the week that contains the clock change is a real week, not 168 hours',
+    (dst.end - dst.start) / 3600, 169);
+  check('and it still starts and ends at local midnight',
+    label('2026-11-05T13:00:00Z'), 'Thu, Oct 29 00:00 to Wed, Nov 4 23:59');
+
+  // A sale made after the week closed belongs to next week's payout. Without
+  // an upper bound it would be paid now and again next Thursday.
+  const periodQuery = [];
+  const periodRun = await runReport(['--period'], { ...FIXTURE, asked: periodQuery },
+    '2026-09-24T12:00:00Z');
+  check('the pay week asks Stripe for an upper bound',
+    periodQuery[0].get('created[lt]'), String(payPeriod(new Date('2026-09-24T12:00:00Z'), TZ).end));
+  check('and a lower bound that is the Thursday midnight',
+    periodQuery[0].get('created[gte]'), String(payPeriod(new Date('2026-09-24T12:00:00Z'), TZ).start));
+  check('the heading names the week, not a day count',
+    /Pay week  Thu, Sep 17 00:00 to Wed, Sep 23 23:59/.test(periodRun.out.join('\n')), true);
+
+  const rolling = [];
+  await runReport([], { ...FIXTURE, asked: rolling }, '2026-09-24T12:00:00Z');
+  check('a plain rolling run sets no upper bound', rolling[0].get('created[lt]'), null);
+  check('and says out loud that it is not a pay week',
+    /rolling - not a pay week/.test((await runReport([], FIXTURE, '2026-09-24T12:00:00Z')).out.join('\n')), true);
 
   console.log('\nNaming the coupon when the key will not attach it');
 
