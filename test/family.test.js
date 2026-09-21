@@ -196,6 +196,22 @@ async function main() {
     const noPhotos = multipart({ theme: 'Family Keepsake', sceneIndex: '0' }, []);
     const empty = await request(server, '/convert', { method: 'POST', body: noPhotos.body, type: noPhotos.type });
     check('no photo at all is still refused', empty.status, 400);
+
+    // The cast sentence lets a scene call for someone by name - that is how a
+    // cheering crowd gets drawn. So a scene that says "a grandchild" or "her
+    // mum" quietly adds a person nobody uploaded, and the customer opens the
+    // PDF to find a stranger in the family. Found on order 67: every Family
+    // Keepsake book drew a fifth child on page 12. Relatives are the cast's
+    // job, never the scene's.
+    const RELATIVE = /\b(grandchild|grandchildren|grandson|granddaughter|grandparent|grandparents|grandma|grandmother|grandpa|grandfather|mother|mum|mom|father|dad|parent|parents|brother|sister|sibling|siblings|son|daughter|husband|wife)\b/i;
+    const namedRelatives = [];
+    for (const [theme, scenes] of Object.entries(STORY_SCENES)) {
+      scenes.forEach((scene, i) => {
+        const hit = scene.match(RELATIVE);
+        if (hit) namedRelatives.push(`${theme} #${i + 1}: ${hit[0]}`);
+      });
+    }
+    check('no scene names a relative the cast may not contain', namedRelatives, []);
   } finally {
     server.close();
   }

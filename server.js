@@ -1363,7 +1363,11 @@ const STORY_SCENES = {
     'the child rocking gently in a rocking chair with a cup of tea',
     'the child tending a warm fireplace in a cozy living room',
     'the child wrapping a gift at a table covered in ribbon',
-    'the child walking hand in hand with a grandchild in the park',
+    // Was "hand in hand with a grandchild". A scene that names a person is
+    // allowed to draw that person - so every Family Keepsake book put a fifth
+    // child nobody uploaded on page 12 (order 67, 21 Sep). Family Keepsake is
+    // for whoever is in the cast; only Grandparent Garden assumes grandparents.
+    'the child walking hand in hand along a tree-lined park path',
     'the child sitting on a porch swing watching the sunset',
     'the child blowing out candles on a birthday cake',
     'the child waving warmly from a front porch, welcoming guests'
