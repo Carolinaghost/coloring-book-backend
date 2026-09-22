@@ -679,7 +679,11 @@ app.post('/checkout', async (req, res) => {
     // Stripe's API takes form-encoded bodies, not JSON.
     const form = new URLSearchParams();
     form.append('mode', 'payment');
-    form.append('success_url', `${SITE_URL}?paid=1&order=${order.id}`);
+    // The amount rides back on the return URL so the browser can report the
+    // real value of the sale to the ad pixel. A discount code can make what
+    // Stripe actually charges lower than this - the pixel is for measuring
+    // which ads produce sales, not for the books, which are Stripe's number.
+    form.append('success_url', `${SITE_URL}?paid=1&order=${order.id}&amt=${(amount / 100).toFixed(2)}`);
     form.append('cancel_url', `${SITE_URL}?canceled=1&order=${order.id}`);
     form.append('client_reference_id', String(order.id));
     if (order.email) form.append('customer_email', order.email);
