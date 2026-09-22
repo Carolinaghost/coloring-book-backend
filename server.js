@@ -2108,6 +2108,18 @@ app.post('/convert', upload.fields([
       console.error('OpenAI error:', renderErr.message);
       // No image, so no preview was used. Give it back before answering.
       if (previewTakenFrom) await giveBackFreePreview(previewTakenFrom);
+      // A free preview that would not draw is not a dead end any more. Mark it
+      // and the sweep will finish it in the background and email the pages, so
+      // a bad two minutes at OpenAI does not cost a customer who did nothing
+      // wrong. Only previews: a paid order already has its own resume.
+      if (previewOrder && !previewOrder.paid) {
+        try {
+          await db.markPreviewRescue(previewOrder.id);
+          console.log(`Order ${previewOrder.id}: preview failed, queued to finish and email.`);
+        } catch (markErr) {
+          console.error('Could not queue a failed preview:', markErr.message);
+        }
+      }
       return res.status(502).json({ error: 'Image conversion failed.', detail: renderErr.message });
     }
 
@@ -2579,6 +2591,145 @@ async function resumeUnfinished() {
     sweeping = false;
   }
 }
+// Finishing a free preview that would not draw, and posting it.
+//
+// The case this exists for: on 21 September OpenAI's safety system refused five
+// draws inside nine minutes. The browser retries three times, but all three
+// land inside the first two minutes, so every one of them failed and four books
+// came to nothing. The same photos drew without complaint an hour later.
+//
+// So the order is kept and tried again on a schedule shaped like those
+// outages - a minute, then four, then ten - and when the pages come out they
+// are emailed. Three goes and then it stops: past that the customer has moved
+// on and we are paying OpenAI to talk to ourselves.
+//
+// Only unpaid orders, and only ones where a draw actually failed. Somebody who
+// wandered off mid-flow is not a failure and must not be drawn for or emailed.
+const PREVIEW_RESCUE_ATTEMPTS = parseInt(process.env.PREVIEW_RESCUE_ATTEMPTS, 10) || 3;
+const PREVIEW_RESCUE_DELAYS = (process.env.PREVIEW_RESCUE_DELAYS || '1,4,10')
+  .split(',').map((x) => parseFloat(x)).filter((x) => x > 0);
+const rescuing = new Set();
+
+async function rescuePreview(orderId) {
+  if (rescuing.has(String(orderId))) return;
+  rescuing.add(String(orderId));
+  try {
+    const order = await db.getOrderForRender(orderId);
+    if (!order) return;
+    // Paid in the meantime: the real render owns it now, and it will draw the
+    // whole book rather than the two pages this was going to send.
+    if (order.paid) return;
+    if (order.previewEmailedAt) return;
+
+    await db.notePreviewAttempt(orderId);
+
+    const cast = cleanPeople(order.people);
+    const isFamily = cast.length > 1;
+    if (!isFamily && !order.photo) return;
+    if (isFamily && !cast.every((p) => p.photo)) return;
+
+    const references = isFamily
+      ? cast.map((person, i) => {
+          const { buffer, mimetype } = dataUrlToBuffer(person.photo);
+          return { buffer, mimetype, filename: `person-${i + 1}.png` };
+        })
+      : [(() => {
+          const { buffer, mimetype } = dataUrlToBuffer(order.photo);
+          return { buffer, mimetype, filename: 'photo.png' };
+        })()];
+
+    const scenes = STORY_SCENES[order.theme] || STORY_SCENES['Portrait'];
+    const wanted = Math.min(FREE_PREVIEW_PAGES, scenes.length);
+    const already = new Set(await db.doneSceneIndexes(orderId));
+    const subjectType = order.subjectType === 'adult' ? 'adult' : 'kid';
+    // Held here as well as saved, because what gets attached has to be what we
+    // actually have in hand. Reading them back is the better source when it
+    // works - it is the stored, re-encoded copy - but a page drawn a second ago
+    // and not readable yet is still a page the customer should be sent.
+    const drawn = new Map();
+
+    // One at a time. This is unpaid work being done to rescue a customer, and
+    // it must never be the reason a paid book waits - renderScene queues it
+    // behind paid pages, and a single lane keeps it out of the way besides.
+    for (let sceneIndex = 0; sceneIndex < wanted; sceneIndex++) {
+      if (already.has(sceneIndex)) continue;
+      const prompt = buildPrompt(order.theme, sceneIndex, order.childCount,
+        subjectType, order.notes, cast, order.detailLevel);
+      try {
+        const image = await renderScene({ photos: references, prompt, paid: false });
+        await db.savePage(orderId, sceneIndex, image);
+        drawn.set(sceneIndex, image);
+        already.add(sceneIndex);
+        console.log(`Order ${orderId}: rescued preview page ${sceneIndex + 1}.`);
+      } catch (err) {
+        console.error(`Order ${orderId}: preview page ${sceneIndex + 1} failed again - ${err.message}`);
+      }
+    }
+
+    // Nothing drawn, nothing to say. It keeps its place in the queue for the
+    // next attempt, and after the third it simply stops.
+    if (!already.size) return;
+    if (!order.email || !mailer.configured) return;
+
+    // Claimed before sending, so two processes sweeping together cannot both
+    // post the same pages to the same person.
+    if (!(await db.claimPreviewEmail(orderId))) return;
+    try {
+      const stored = new Map();
+      for (const page of await db.listPages(orderId)) stored.set(page.sceneIndex, page.image);
+      const attachments = [];
+      for (let i = 0; i < wanted; i++) {
+        const image = stored.get(i) || drawn.get(i);
+        if (!image) continue;
+        const { buffer, mimetype } = dataUrlToBuffer(image);
+        attachments.push({
+          filename: `page-${i + 1}.png`,
+          contentType: mimetype || 'image/png',
+          content: buffer
+        });
+      }
+      // Claimed but nothing to put in the envelope. Hand it back rather than
+      // sending an apology with no pages in it, which is worse than silence.
+      if (!attachments.length) {
+        await db.releasePreviewEmail(orderId).catch(() => {});
+        return;
+      }
+      const msg = mailer.previewReadyEmail({
+        childName: order.childName,
+        orderId: order.id,
+        accessToken: order.accessToken,
+        siteUrl: SITE_URL,
+        pageCount: attachments.length,
+        totalPages: scenes.length
+      });
+      await mailer.sendMail({
+        to: order.email, subject: msg.subject, text: msg.text, html: msg.html, attachments
+      });
+      console.log(`Order ${orderId}: late preview emailed with ${attachments.length} page(s).`);
+    } catch (mailErr) {
+      // Hand the send back, or a bounced email looks exactly like a delivered
+      // one and nobody ever tries again.
+      await db.releasePreviewEmail(orderId).catch(() => {});
+      console.error(`Order ${orderId}: could not email the late preview - ${mailErr.message}`);
+    }
+  } finally {
+    rescuing.delete(String(orderId));
+  }
+}
+
+async function rescueFailedPreviews() {
+  try {
+    const ids = await db.rescuablePreviews(PREVIEW_RESCUE_ATTEMPTS, PREVIEW_RESCUE_DELAYS);
+    for (const id of ids) {
+      if (rescuing.has(String(id))) continue;
+      rescuePreview(id).catch((err) =>
+        console.error(`Order ${id}: preview rescue failed -`, err.message));
+    }
+  } catch (err) {
+    console.error('Preview rescue sweep failed:', err.message);
+  }
+}
+
 // One timer for both the resume sweep and the watchdog. Separate timers would
 // wake the database twice as often for no extra safety, and it is the number of
 // wakes that costs, not the work done in them.
@@ -2588,6 +2739,7 @@ let lastWatchdogAt = 0;
 async function heartbeat() {
   try {
     await resumeUnfinished();
+    await rescueFailedPreviews();
     // While busy the sweep runs every minute, but the watchdog has nothing new
     // to say that often. When idle they share the one wake.
     const due = Date.now() - lastWatchdogAt >= WATCHDOG_MINUTES * 60 * 1000;
@@ -2627,4 +2779,5 @@ if (require.main === module) {
 }
 
 module.exports = { app, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
-  sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
+  sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
+  rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
