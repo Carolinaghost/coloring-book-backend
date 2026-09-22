@@ -1982,6 +1982,26 @@ async function takeFreePreview(ip) {
   return null;
 }
 
+// The other half of takeFreePreview. A preview is charged for before OpenAI is
+// asked - it has to be, or the endpoint can be looped for free - so a draw that
+// comes back empty has taken something from the visitor and given nothing back.
+//
+// Cheryl found this the hard way: eight previews spent in ten minutes, five of
+// them refused by OpenAI's safety system, and she came away with one book out
+// of four and no allowance left to try again. Nothing about that was her fault
+// and all of it looked like ours.
+//
+// The site-wide hourly window is deliberately NOT refunded. That one exists to
+// blunt a spike, and a spike of failing requests is still a spike.
+async function giveBackFreePreview(ip) {
+  try {
+    await db.refundPreviewQuota(ip, previewDay());
+  } catch (err) {
+    // Worth knowing about, not worth turning one failure into two.
+    console.error('Could not give back a free preview -', err.message);
+  }
+}
+
 // Yesterday's counters are dead weight. Once a day, quietly.
 setInterval(() => {
   db.purgeOldPreviewQuota().catch((err) =>
@@ -1994,6 +2014,9 @@ app.post('/convert', upload.fields([
   { name: 'photo', maxCount: 1 },
   { name: 'photos', maxCount: MAX_PEOPLE }
 ]), async (req, res) => {
+  // Declared out here, not inside the try, because the catch at the bottom has
+  // to be able to see whether a preview was charged for.
+  let previewTakenFrom = null;
   try {
     const singlePhoto = (req.files && req.files.photo && req.files.photo[0]) || null;
     const familyPhotos = (req.files && req.files.photos) || [];
@@ -2032,7 +2055,8 @@ app.post('/convert', upload.fields([
     let previewOrder = null;
     if (sceneIndex < FREE_PREVIEW_PAGES) {
       // Nobody has paid for this one yet, so it has to be rationed.
-      const blocked = await takeFreePreview(clientIp(req));
+      const visitorIp = clientIp(req);
+      const blocked = await takeFreePreview(visitorIp);
       if (blocked === 'visitor') {
         return res.status(429).json({
           error: 'You have used up today\'s free previews. Finish an order to get the whole book now.'
@@ -2043,6 +2067,7 @@ app.post('/convert', upload.fields([
           error: 'We are busier than usual and free previews are paused for a few minutes. Please try again shortly.'
         });
       }
+      previewTakenFrom = visitorIp;
       // A preview still belongs to an order. Identify it - payment not required
       // - so the drawn page can be kept. Then a retry after a dropped phone
       // connection costs nothing instead of paying OpenAI to draw it twice.
@@ -2081,6 +2106,8 @@ app.post('/convert', upload.fields([
       image = await renderScene({ photos: references, prompt, paid: paidOrder !== null });
     } catch (renderErr) {
       console.error('OpenAI error:', renderErr.message);
+      // No image, so no preview was used. Give it back before answering.
+      if (previewTakenFrom) await giveBackFreePreview(previewTakenFrom);
       return res.status(502).json({ error: 'Image conversion failed.', detail: renderErr.message });
     }
 
@@ -2104,6 +2131,9 @@ app.post('/convert', upload.fields([
     res.json({ image, sceneIndex });
   } catch (err) {
     console.error(err);
+    // Same reasoning as the render failure: whatever went wrong in here, the
+    // visitor is not getting a page out of it, so they keep their preview.
+    if (previewTakenFrom) await giveBackFreePreview(previewTakenFrom);
     res.status(500).json({ error: 'Server error converting image.' });
   }
 });

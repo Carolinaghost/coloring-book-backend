@@ -1144,6 +1144,34 @@ async function takePreviewQuota(ip, day, limit) {
   return rows.length ? { allowed: true, used: rows[0].used } : { allowed: false, used: limit };
 }
 
+// Handing one back. A preview is charged for before OpenAI is asked, because
+// the alternative is asking first and letting somebody loop the endpoint for
+// free - so when the drawing fails the visitor has paid for nothing and the
+// count has to come back down.
+//
+// Never below zero, and never above the limit it was counted against: a refund
+// is undoing something that happened, not a credit to spend later.
+//
+// This cannot be gamed into free previews. A refunded attempt produced no
+// image - there is nothing to harvest by forcing failures - and the site-wide
+// hourly cap is not refunded at all, so what OpenAI can be made to spend in an
+// hour is unchanged.
+async function refundPreviewQuota(ip, day) {
+  if (!usingPostgres) {
+    const key = `${ip}|${day}`;
+    const used = memoryPreviewQuota.get(key) || 0;
+    if (used > 0) memoryPreviewQuota.set(key, used - 1);
+    return Math.max(used - 1, 0);
+  }
+  const { rows } = await pool.query(
+    `UPDATE preview_quota SET used = used - 1
+      WHERE ip = $1 AND day = $2 AND used > 0
+     RETURNING used`,
+    [ip, day]
+  );
+  return rows.length ? rows[0].used : 0;
+}
+
 // Yesterday's rows are of no further use. Kept for a few days only so a
 // question like "was that visitor throttled on Tuesday" can still be answered.
 async function purgeOldPreviewQuota(days = 7) {
@@ -1283,6 +1311,7 @@ module.exports = {
   get pool() { return pool; },
   usingPostgres,
   takePreviewQuota,
+  refundPreviewQuota,
   purgeOldPreviewQuota,
   takeSignupQuota,
   claimJobRun,
