@@ -227,6 +227,50 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
   return { subject, text, html };
 }
 
+// Sent when the free preview would not draw and we finished it afterwards.
+//
+// The apology comes first and the pages come second, because by the time this
+// lands the customer has already been told something went wrong and has had
+// several minutes to decide we are not very good at this. The pages are the
+// argument against that, so they are attached rather than linked - an inbox
+// on a phone shows an image without asking, and a link is a decision.
+//
+// No discount, no offer, nothing to click except the way back to their own
+// book. They asked for two free pages; this is the two free pages, late.
+function previewReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount, totalPages }) {
+  // Same reasoning as the ready email: the token rides in the fragment, which
+  // browsers do not send to servers and logs never see.
+  const link = siteUrl + '?order=' + orderId + '#t=' + encodeURIComponent(accessToken);
+  const who = childName || 'your child';
+  const pages = pageCount === 1 ? 'page' : 'pages';
+  const subject = 'Your free ' + pages + ' of ' + who + "'s coloring book";
+  const text = [
+    'Sorry about that - the drawing would not come out while you were waiting.',
+    'It has now. Your free ' + pages + ' ' + (pageCount === 1 ? 'is' : 'are') + ' attached.',
+    '',
+    'To see ' + who + "'s whole book - all " + totalPages + ' pages - pick up where you left off:',
+    link,
+    '',
+    'Nothing was charged and nothing was used up. If you would rather start',
+    'again with a different photo, that is fine too.',
+    '',
+    '- Crayonauts'
+  ].join('\n');
+  const html = [
+    '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
+    '<h2 style="color:#2F5FA8;">Sorry about the wait</h2>',
+    '<p>The drawing would not come out while you were on the site. It has now &mdash; '
+    + 'your free ' + pages + ' ' + (pageCount === 1 ? 'is' : 'are') + ' attached to this email.</p>',
+    '<p>To see ' + escapeHtml(who) + "'s whole book, all " + totalPages + ' pages:</p>',
+    '<p><a href="' + link + '" style="display:inline-block;background:#2F5FA8;color:#fff;padding:12px 22px;'
+    + 'border-radius:8px;text-decoration:none;font-weight:bold;">Pick up where you left off</a></p>',
+    '<p style="font-size:13px;color:#6B6357;">Nothing was charged and nothing was used up. '
+    + 'If you would rather start again with a different photo, that is fine too.</p>',
+    '</div>'
+  ].join('');
+  return { subject, text, html };
+}
+
 // The one email a new creator gets. Everything they need to start earning is
 // in it, and nothing they have to fill in is: bank details and the W-9 are
 // collected by the payment service, in a separate invite, because a routing
@@ -318,4 +362,4 @@ function escapeHtml(v) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-module.exports = { sendMail, orderReadyEmail, creatorWelcomeEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
+module.exports = { sendMail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };

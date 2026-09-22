@@ -222,6 +222,14 @@ const MIGRATIONS = [
   // the middle band - the same thing they were most likely already getting.
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS detail_level TEXT NOT NULL DEFAULT 'standard'",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS render_attempts INTEGER NOT NULL DEFAULT 0",
+  // A preview that failed to draw. Null on every other order, which is the
+  // point: only an order whose free preview actually came back empty gets
+  // picked up again, never the far larger number of people who simply left.
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS preview_rescue_at TIMESTAMPTZ",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS preview_attempts INTEGER NOT NULL DEFAULT 0",
+  // Set once, and checked before sending. Two web processes sweeping at the
+  // same moment must not both post the same pages to the same person.
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS preview_emailed_at TIMESTAMPTZ",
   // Null on every existing row, which reads as "never tried" and lets the
   // sweep pick it up at once - the right answer for anything stuck today.
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ",
@@ -332,6 +340,9 @@ function rowToOrder(row) {
     detailLevel: row.detail_level || 'standard',
     renderAttempts: row.render_attempts || 0,
     lastAttemptAt: row.last_attempt_at ? new Date(row.last_attempt_at).toISOString() : null,
+    previewRescueAt: row.preview_rescue_at ? new Date(row.preview_rescue_at).toISOString() : null,
+    previewAttempts: row.preview_attempts || 0,
+    previewEmailedAt: row.preview_emailed_at ? new Date(row.preview_emailed_at).toISOString() : null,
     visitor: row.visitor || '',
     source: row.source || '',
     campaign: row.campaign || '',
@@ -358,6 +369,9 @@ async function saveOrder(order) {
       // test stops holding in production.
       renderAttempts: 0,
       lastAttemptAt: null,
+      previewRescueAt: null,
+      previewAttempts: 0,
+      previewEmailedAt: null,
       ...order
     };
     memoryOrders.push(saved);
@@ -926,6 +940,95 @@ async function resumableOrders(maxAttempts, backoffMinutes) {
   return rows.map((r) => r.id);
 }
 
+// A free preview that came back empty. Marked at the moment the draw failed,
+// and only then - an order nobody ever managed to draw is a different thing
+// from the many orders where somebody simply wandered off, and only the first
+// is worth paying OpenAI to try again.
+//
+// Already emailed means already finished, so it is left alone. Otherwise the
+// clock starts now: the sweep waits out the schedule from this moment.
+async function markPreviewRescue(id) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => String(x.id) === String(id));
+    if (o && !o.previewEmailedAt) o.previewRescueAt = new Date().toISOString();
+    return;
+  }
+  await pool.query(
+    'UPDATE orders SET preview_rescue_at = NOW() '
+    + 'WHERE id = $1 AND preview_emailed_at IS NULL', [Number(id)]);
+}
+
+// Which failed previews are due another go. The delays are passed in rather
+// than doubled from a base, because the windows being waited out are not
+// shaped like a doubling: OpenAI's safety refusals came in clumps of seven and
+// nine minutes, so the third try has to land past ten and the first has to be
+// soon enough that the email still feels like part of what they just did.
+async function rescuablePreviews(maxAttempts, delaysMinutes) {
+  const cap = Number(maxAttempts) > 0 ? Number(maxAttempts) : 3;
+  const d = Array.isArray(delaysMinutes) && delaysMinutes.length === 3
+    ? delaysMinutes.map(Number) : [1, 4, 10];
+  const hasImages = (o) => Boolean(o.photo) || Boolean(o.people && o.people.length);
+  if (!usingPostgres) {
+    const now = Date.now();
+    return memoryOrders
+      .filter((o) => o.previewRescueAt && !o.previewEmailedAt && !o.paid && hasImages(o)
+        && (o.previewAttempts || 0) < cap
+        && new Date(o.previewRescueAt).getTime()
+             + d[Math.min(o.previewAttempts || 0, 2)] * 60000 <= now)
+      .map((o) => o.id);
+  }
+  const { rows } = await pool.query(
+    'SELECT id FROM orders '
+    + 'WHERE preview_rescue_at IS NOT NULL AND preview_emailed_at IS NULL '
+    + 'AND paid = FALSE '
+    + 'AND (photo IS NOT NULL OR people IS NOT NULL) '
+    + 'AND preview_attempts < $1 '
+    + "AND preview_rescue_at < NOW() - (CASE preview_attempts WHEN 0 THEN $2 WHEN 1 THEN $3 "
+    + "     ELSE $4 END) * INTERVAL '1 minute' "
+    + 'ORDER BY id',
+    [cap, d[0], d[1], d[2]]);
+  return rows.map((r) => r.id);
+}
+
+// One go used up. The clock restarts from now, so the next delay is measured
+// from this attempt and not from the original failure.
+async function notePreviewAttempt(id) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => String(x.id) === String(id));
+    if (o) { o.previewAttempts = (o.previewAttempts || 0) + 1; o.previewRescueAt = new Date().toISOString(); }
+    return;
+  }
+  await pool.query(
+    'UPDATE orders SET preview_attempts = preview_attempts + 1, preview_rescue_at = NOW() '
+    + 'WHERE id = $1', [Number(id)]);
+}
+
+// Claims the send. Returns true for exactly one caller, so two processes
+// sweeping together cannot both email the same person the same pages.
+async function claimPreviewEmail(id) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => String(x.id) === String(id));
+    if (!o || o.previewEmailedAt) return false;
+    o.previewEmailedAt = new Date().toISOString();
+    return true;
+  }
+  const { rows } = await pool.query(
+    'UPDATE orders SET preview_emailed_at = NOW() '
+    + 'WHERE id = $1 AND preview_emailed_at IS NULL RETURNING id', [Number(id)]);
+  return rows.length > 0;
+}
+
+// Handing the send back when it did not go. Without this a bounced or refused
+// email would look exactly like a delivered one and never be tried again.
+async function releasePreviewEmail(id) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => String(x.id) === String(id));
+    if (o) o.previewEmailedAt = null;
+    return;
+  }
+  await pool.query('UPDATE orders SET preview_emailed_at = NULL WHERE id = $1', [Number(id)]);
+}
+
 // Pulls a waiting order forward by moving its last attempt into the past, so
 // the sweep stops backing off and takes it on the next pass. Written for the
 // tests, which cannot wait half an hour to watch a back-off expire, and equally
@@ -1334,6 +1437,11 @@ module.exports = {
   clearPhoto,
   purgeOldOrders,
   resumableOrders,
+  markPreviewRescue,
+  rescuablePreviews,
+  notePreviewAttempt,
+  claimPreviewEmail,
+  releasePreviewEmail,
   bumpRenderAttempts,
   backdateLastAttempt,
   savePage,
