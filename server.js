@@ -995,6 +995,26 @@ if (!CAN_CALL_OPENAI) {
 //     --photos "https://crayonauts.com/samples/examples/set1-mom.png,https://crayonauts.com/samples/examples/set1-dad.png" \
 //     --names "Mum,Dad" --types "adult,adult" --detail simple --pages 2
 //
+// Curls are the fourth failure, and the same shape as the first three: the
+// list only stops what it can name, and not one word in it named a curl.
+// Solid black, scribbles, crosshatching, stippling, dots, a curtain of
+// parallel strands - a tight coil is none of those. It is a small spiral,
+// drawn correctly, hundreds of times, and every ban above walks past it.
+// Jasmin's book came back with a head of ringlets on a page where every
+// other rule held, so the ban now names the shape: spirals, coils,
+// corkscrews, ringlets, loops, zigzags, repeated c- and s-shapes.
+//
+// The outline sentence is the guard rail on the ban. Curl texture is how
+// the model was saying "this hair is curly", and taking the texture away
+// without saying what to keep invites it to take the shape away too - a
+// child with an afro handed back with flat straight hair is a worse page
+// than a busy one, and a worse thing to sell. So the silhouette is stated
+// as a positive: keep the hairstyle the photo shows, draw its inside open.
+//
+// Regression render for this one is a child with tightly coiled hair at
+// STANDARD, which is where it was found. set1-mom exposes the strand
+// version; she does not expose this one.
+//
 // Beards get their own sentence because "hair" did not reach them. A dad with a
 // few days of stubble came back with a chin of hundreds of tiny dots - already
 // grey, nothing left for a child to colour - while the hair on his head obeyed
@@ -1010,7 +1030,7 @@ if (!CAN_CALL_OPENAI) {
 // categories rather than gesture at them - the stippling lesson, again: a ban
 // only stops what it can name.
 
-const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands, well separated, with plenty of white showing between them - never fill hair with solid black, dense scribbles, crosshatching, stippling, any field of small dots, or a dense curtain of many fine parallel strands, no matter how dark or curly the hair is in the photo. Draw a beard, moustache or stubble the same way: one clean outline around the shape of it and open white inside, never speckles, flecks or shaded texture, however short the hair is. Never reproduce any logo, emblem, team crest, badge, brand mark, wordmark, slogan, mascot, cartoon character or licensed artwork, even when one is clearly printed on clothing, a bag, a cap, a cup, a toy or anything else in the photo - draw that surface as plain blank fabric or plain blank material with nothing on it, keeping only the shape of the garment or object itself. Every part of the drawing must be left white so a child can color it in.';
+const BASE_STYLE = 'Black and white coloring book page, clean bold outlines only, no shading, no gray tones, no text or captions of any kind - every sign, label, jar, book, cushion, picture frame and gift tag is left blank, with no letters, words or numbers anywhere in the picture - simple line art suitable for a child to color in. Draw all hair as open white space with only a few clean curved outline strands, well separated, with plenty of white showing between them - never fill hair with solid black, dense scribbles, crosshatching, stippling, any field of small dots, or a dense curtain of many fine parallel strands, no matter how dark or curly the hair is in the photo. Curly, coily and afro hair is where this breaks most often, and it breaks by drawing every single curl: never fill hair with small spirals, coils, corkscrews, ringlets, loops, zigzags or repeated c-shapes or s-shapes, however tightly curled the hair is in the photo. Keep the outline of the hairstyle exactly as the photo shows it - a big round afro stays a big round afro, two puffs stay two puffs - and draw what is inside that outline as a few large curved shapes with wide open white between them, never as the curls themselves. Draw a beard, moustache or stubble the same way: one clean outline around the shape of it and open white inside, never speckles, flecks or shaded texture, however short the hair is. Never reproduce any logo, emblem, team crest, badge, brand mark, wordmark, slogan, mascot, cartoon character or licensed artwork, even when one is clearly printed on clothing, a bag, a cap, a cup, a toy or anything else in the photo - draw that surface as plain blank fabric or plain blank material with nothing on it, keeping only the shape of the garment or object itself. Every part of the drawing must be left white so a child can color it in.';
 
 // BASE_STYLE fixes the look - bold outlines, no shading, no text, open hair -
 // but says nothing about how MUCH is in the picture. Left to itself the model
