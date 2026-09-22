@@ -18,10 +18,11 @@
 // several times a week without anyone noticing.
 
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_not_a_real_key';
+process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'sk-not-a-real-key';
 delete process.env.DATABASE_URL;   // exercise the in-memory store
 
 const db = require('../db.js');
-const { previewDay, clientIp } = require('../server.js');
+const { app, previewDay, clientIp } = require('../server.js');
 
 let pass = 0;
 const failures = [];
@@ -101,6 +102,100 @@ async function main() {
   // The specific failure mode, stated as a test so it cannot come back.
   check('the Cloudflare edge is never what gets counted',
     clientIp(req({ 'cf-connecting-ip': '198.51.100.4' }, '172.71.190.90')) === '172.71.190.90', false);
+
+  console.log('\nGiving one back');
+
+  // A preview is charged for before OpenAI is asked - it has to be, or the
+  // endpoint can be looped for free - so a draw that fails has taken something
+  // and given nothing back. Cheryl spent eight in ten minutes, five of them
+  // refused by OpenAI, and finished with one book out of four and no allowance
+  // left to try again.
+  const refundDay = '2026-09-25';
+  await take('4.4.4.4', refundDay);
+  await take('4.4.4.4', refundDay);
+  check('two taken', (await take('4.4.4.4', refundDay, 99)).used, 3);
+  check('one given back leaves the count where it was',
+    await db.refundPreviewQuota('4.4.4.4', refundDay), 2);
+
+  // A refund undoes something that happened. It is not a credit.
+  const freshDay = '2026-09-26';
+  check('a visitor who took nothing cannot be refunded below zero',
+    await db.refundPreviewQuota('5.5.5.5', freshDay), 0);
+  const afterBogusRefund = [];
+  for (let i = 0; i < 9; i++) afterBogusRefund.push((await take('5.5.5.5', freshDay)).allowed);
+  check('and still gets exactly the eight they were owed',
+    afterBogusRefund, Array(8).fill(true).concat([false]));
+
+  // The one that would have saved her: spend the lot, have them all fail, and
+  // the allowance is whole again.
+  const spentDay = '2026-09-27';
+  for (let i = 0; i < 8; i++) await take('6.6.6.6', spentDay);
+  check('eight spent means the ninth is refused',
+    (await take('6.6.6.6', spentDay)).allowed, false);
+  for (let i = 0; i < 8; i++) await db.refundPreviewQuota('6.6.6.6', spentDay);
+  check('eight given back means they can try again',
+    (await take('6.6.6.6', spentDay)).allowed, true);
+
+  console.log('\nWhen the drawing actually fails');
+
+  // End to end, through the real endpoint, because the refund is only worth
+  // anything if the failure path reaches it.
+  const realFetch = global.fetch;
+  const server = app.listen(0);
+  try {
+    await new Promise((r) => server.once('listening', r));
+    const { port } = server.address();
+    const visitor = '203.0.113.77';
+    const today = previewDay();
+
+    const convert = async () => {
+      const form = new FormData();
+      form.append('photo', new Blob([Buffer.from('not really a jpeg')], { type: 'image/jpeg' }), 'kid.jpg');
+      form.append('theme', 'Superhero');
+      form.append('sceneIndex', '0');
+      const r = await realFetch(`http://127.0.0.1:${port}/convert`, {
+        method: 'POST', body: form, headers: { 'x-forwarded-for': visitor }
+      });
+      return { status: r.status, body: await r.json() };
+    };
+
+    // What OpenAI did to her: refused, five times, with no page to show for it.
+    global.fetch = async (url) => {
+      const href = typeof url === 'string' ? url : url.href || String(url);
+      if (href.includes('api.openai.com')) {
+        return {
+          ok: false, status: 400,
+          text: async () => JSON.stringify({ error: { message: 'Your request was rejected by the safety system.' } }),
+          json: async () => ({ error: { message: 'Your request was rejected by the safety system.' } })
+        };
+      }
+      return realFetch(url);
+    };
+
+    const refused = await convert();
+    check('a refused draw is reported as a failure', refused.status, 502);
+    check('and costs the visitor nothing',
+      (await db.takePreviewQuota(visitor, today, 99)).used, 1);
+    await db.refundPreviewQuota(visitor, today);   // undo the probe above
+
+    // And a real page still counts, or the ration means nothing.
+    const onePngPixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    global.fetch = async (url) => {
+      const href = typeof url === 'string' ? url : url.href || String(url);
+      if (href.includes('api.openai.com')) {
+        return { ok: true, json: async () => ({ data: [{ b64_json: onePngPixel }] }) };
+      }
+      return realFetch(url);
+    };
+
+    const drawn = await convert();
+    check('a page that was actually drawn comes back', drawn.status, 200);
+    check('and that one is charged for',
+      (await db.takePreviewQuota(visitor, today, 99)).used, 2);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
 
   console.log(`\n${pass} passed, ${failures.length} failed`);
   if (failures.length) {
