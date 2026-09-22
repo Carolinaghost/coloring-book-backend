@@ -983,8 +983,14 @@ async function rescuablePreviews(maxAttempts, delaysMinutes) {
     + 'AND paid = FALSE '
     + 'AND (photo IS NOT NULL OR people IS NOT NULL) '
     + 'AND preview_attempts < $1 '
-    + "AND preview_rescue_at < NOW() - (CASE preview_attempts WHEN 0 THEN $2 WHEN 1 THEN $3 "
-    + "     ELSE $4 END) * INTERVAL '1 minute' "
+    // The casts are load-bearing. Without them Postgres types the CASE as
+    // text - the driver sends numbers as text and nothing in the branches
+    // says otherwise - and refuses with "operator does not exist: text *
+    // interval". The in-memory store has no opinion about types, so the
+    // whole suite passed and it failed on the first sweep in production.
+    + "AND preview_rescue_at < NOW() - (CASE preview_attempts "
+    + "     WHEN 0 THEN $2::numeric WHEN 1 THEN $3::numeric ELSE $4::numeric "
+    + "     END) * INTERVAL '1 minute' "
     + 'ORDER BY id',
     [cap, d[0], d[1], d[2]]);
   return rows.map((r) => r.id);
