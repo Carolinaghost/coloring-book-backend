@@ -1456,23 +1456,36 @@ async function waitForImageSlot(paid) {
 // Roughly half, decided per page - a coin flip, which is what "roughly" means
 // here; over fifteen pages it lands near enough to half.
 //
-// Off by default, and that is a retreat.
+// On by default. This paragraph used to say the opposite, and the reversal is
+// worth reading before anybody turns it off again.
 //
 // Flipping was done blind at first, on the grounds that BASE_STYLE rules out
 // text so there would be no lettering to reverse. The model letters signs and
 // jars anyway, and four pages in a sixty-page run shipped reading right to
-// left. The fix was to read each page for words first - but the first reader
-// missed all six real cases, and the replacement (mirror-guard.js) is only
-// measured against those same six. Six pages is not enough to promise a
-// seventh kind of lettering gets caught, and the thing being risked is a
-// finished book someone paid for.
+// left. A word check was put in front of every flip - and on 14 September this
+// was set to 0 anyway, because that check (mirror-guard.js, pixels) had only
+// ever been measured against six real lettered pages, and a book with
+// backwards writing in it is one that gets sent back.
 //
-// So the lean-variety this buys is not worth the remaining doubt, and pages go
-// out as drawn. Set MIRROR_CHANCE to put it back - 0.5 is what it used to run
-// at - and the word check still gates every flip.
+// text-guard.js closed that two days later: a vision check that reads the
+// page, asked alongside the pixel one, flipping only when BOTH say the page is
+// clean. Measured together over thirty pages, 30/30, and no clean page held
+// back. The doubt the retreat was protecting against stopped existing on 16
+// September and nobody moved this line, so it went on costing something real.
+//
+// What it costs: the model ignores left and right - four explicit direction
+// prompts came back identical - so the finished flip is the ONLY control over
+// which way a page faces. With this at 0, every book leans whichever way its
+// photo leans. Found on a customer-facing book whose subject was angled in her
+// photo: fifteen pages, every one of them facing the same way.
+//
+// Roughly half, decided per page - a coin flip, which is what "roughly" means
+// here; over fifteen pages it lands near enough to half. If a book ever
+// clusters one way anyway, make it alternate rather than tossing; that is a
+// smaller change than switching this off.
 const MIRROR_CHANCE = process.env.MIRROR_CHANCE !== undefined
   ? Math.min(1, Math.max(0, parseFloat(process.env.MIRROR_CHANCE) || 0))
-  : 0;
+  : 0.5;
 
 async function maybeMirror(b64) {
   if (Math.random() >= MIRROR_CHANCE) return b64;
