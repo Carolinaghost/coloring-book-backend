@@ -642,13 +642,118 @@ app.post('/creators', async (req, res) => {
   }
 });
 
+// How each creator's code has actually done. Signing somebody up and somebody
+// selling for you are two different things, and until this existed the list
+// could not tell them apart - four names, four codes, and no way to see that
+// none of them had sold anything yet.
+//
+// Sales come from Stripe's own redemption counter on the promotion code, which
+// is one request for every code we have and cannot drift out of step with a
+// page limit. Revenue has to be added up from the sessions themselves, because
+// Stripe counts redemptions but does not total them, so that part is paginated
+// and says so when it gives up rather than quietly reporting a short number.
+//
+// This is the at-a-glance view, not the payroll. What is actually owed on a
+// given week comes from scripts/affiliate-report.js, which knows about pay
+// periods, per-creator rates and which Friday a sale belongs to. Two places
+// computing money would eventually disagree, and the one that pays people has
+// to be the one that is right.
+
+// Five minutes. The admin page gets opened, read and left open, and every
+// reload would otherwise walk every checkout session Stripe has. Set to 0
+// to recompute every time, which is what the tests do.
+const SALES_CACHE_MS = process.env.CREATOR_SALES_CACHE_MS !== undefined
+  ? Math.max(0, parseInt(process.env.CREATOR_SALES_CACHE_MS, 10) || 0)
+  : 5 * 60 * 1000;
+const SESSION_PAGE_CAP = 10;          // 1000 sessions, then say it was capped
+let salesCache = { at: 0, value: null };
+
+async function stripeList(path, params) {
+  const url = new URL('https://api.stripe.com/v1' + path);
+  for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, v);
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` }
+  });
+  if (!resp.ok) throw new Error('Stripe said ' + resp.status + ' for ' + path);
+  return resp.json();
+}
+
+async function creatorSales() {
+  if (!STRIPE_SECRET_KEY) return { available: false, byPromoId: {}, complete: true };
+  const now = Date.now();
+  if (salesCache.value && now - salesCache.at < SALES_CACHE_MS) return salesCache.value;
+
+  const byPromoId = {};
+  const bump = (id) => (byPromoId[id] = byPromoId[id] || { sales: 0, revenueCents: 0 });
+
+  // Every promotion code, with the count Stripe keeps itself.
+  let startingAfter = null;
+  for (let page = 0; page < SESSION_PAGE_CAP; page++) {
+    const params = { limit: '100' };
+    if (startingAfter) params.starting_after = startingAfter;
+    const body = await stripeList('/promotion_codes', params);
+    for (const code of body.data || []) bump(code.id).sales = code.times_redeemed || 0;
+    if (!body.has_more || !body.data.length) break;
+    startingAfter = body.data[body.data.length - 1].id;
+  }
+
+  // What those redemptions were worth. Only sessions that were actually paid
+  // count: an abandoned checkout carries the code too, and paying a creator
+  // for a browser tab somebody closed is not a mistake you find quickly.
+  let complete = true;
+  startingAfter = null;
+  for (let page = 0; ; page++) {
+    if (page >= SESSION_PAGE_CAP) { complete = false; break; }
+    const params = { limit: '100', 'expand[]': 'data.discounts.promotion_code' };
+    if (startingAfter) params.starting_after = startingAfter;
+    const body = await stripeList('/checkout/sessions', params);
+    for (const session of body.data || []) {
+      if (session.payment_status !== 'paid') continue;
+      for (const d of Array.isArray(session.discounts) ? session.discounts : []) {
+        const id = typeof d.promotion_code === 'string'
+          ? d.promotion_code
+          : (d.promotion_code && d.promotion_code.id) || '';
+        if (!id) continue;
+        bump(id).revenueCents += session.amount_total || 0;
+      }
+    }
+    if (!body.has_more || !body.data.length) break;
+    startingAfter = body.data[body.data.length - 1].id;
+  }
+
+  const value = { available: true, byPromoId, complete };
+  salesCache = { at: now, value };
+  return value;
+}
+
 // Who has signed up, for Jonathan. Includes whether the welcome email went,
 // because a creator who never got theirs looks identical to one who did until
-// somebody checks.
+// somebody checks - and now how much each of them has actually sold.
 app.get('/creators', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    res.json({ creators: await db.listCreators() });
+    const creators = await db.listCreators();
+    let sales = { available: false, byPromoId: {}, complete: true };
+    try {
+      sales = await creatorSales();
+    } catch (err) {
+      // The list is the thing being asked for. Stripe being slow or cross must
+      // not turn a page of names into an error page.
+      console.error('Could not load creator sales:', err.message);
+    }
+    res.json({
+      creators: creators.map((c) => {
+        const paid = sales.byPromoId[c.promoId] || null;
+        const free = sales.byPromoId[c.freePromoId] || null;
+        return {
+          ...c,
+          sales: sales.available && paid ? paid.sales : (sales.available ? 0 : null),
+          revenueCents: sales.available && paid ? paid.revenueCents : (sales.available ? 0 : null),
+          freeBookUsed: sales.available ? Boolean(free && free.sales) : null
+        };
+      }),
+      salesComplete: sales.available ? sales.complete : null
+    });
   } catch (err) {
     console.error('Could not list creators:', err.message);
     res.status(500).json({ error: 'Could not load creators.' });
