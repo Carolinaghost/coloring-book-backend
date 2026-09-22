@@ -2377,6 +2377,11 @@ function pollDelayMs({ rendering = 0, sinceActivityMs = Infinity, openAlerts = f
 // those orders and finishes them. renderBook skips pages that already exist,
 // so resuming costs only the pages that are actually missing.
 const MAX_RENDER_ATTEMPTS = parseInt(process.env.MAX_RENDER_ATTEMPTS, 10) || 5;
+// How long the first retry waits, doubling each time after that: 2, 4, 8, 16,
+// 32 minutes. Five attempts a minute apart is not five chances, it is one bad
+// minute - a fifteen-minute OpenAI outage used to spend every attempt an order
+// had and strand it after the outage cleared.
+const RENDER_BACKOFF_MINUTES = parseFloat(process.env.RENDER_BACKOFF_MINUTES) || 2;
 let sweeping = false;
 async function resumeUnfinished() {
   if (sweeping) return;
@@ -2384,7 +2389,7 @@ async function resumeUnfinished() {
   try {
     const free = MAX_CONCURRENT_BOOKS - rendering.size;
     if (free <= 0) return;
-    const ids = await db.resumableOrders(MAX_RENDER_ATTEMPTS);
+    const ids = await db.resumableOrders(MAX_RENDER_ATTEMPTS, RENDER_BACKOFF_MINUTES);
     const waiting = ids.filter((id) => !rendering.has(String(id)));
     if (waiting.length === 0) return;
     const starting = waiting.slice(0, free);

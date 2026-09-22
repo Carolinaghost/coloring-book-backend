@@ -29,7 +29,10 @@ if (usingPostgres) {
     connectionString: DATABASE_URL,
     // Hosted Postgres (Render, Neon, Supabase) requires SSL. Their certs are
     // signed by roots Node doesn't always carry, hence rejectUnauthorized.
-    ssl: { rejectUnauthorized: false },
+    // A URL that says sslmode=disable outright means somebody is pointing this
+    // at a scratch database on their own machine, which has no certificate at
+    // all - no hosted URL carries that, so production is unaffected.
+    ssl: /[?&]sslmode=disable\b/.test(DATABASE_URL) ? false : { rejectUnauthorized: false },
     max: 5,
     idleTimeoutMillis: 30000,
     // Neon's free compute sleeps when idle; give the first connection room to
@@ -68,6 +71,8 @@ const CREATE_TABLE_SQL = `
     subject_type      TEXT        NOT NULL DEFAULT 'kid',
     -- how busy the pages are: simple, standard or detailed
     detail_level      TEXT        NOT NULL DEFAULT 'standard',
+    -- when the last render attempt started, so a failed one can back off
+    last_attempt_at   TIMESTAMPTZ,
     generation_status TEXT        NOT NULL DEFAULT 'idle'
   );
 `;
@@ -217,6 +222,9 @@ const MIGRATIONS = [
   // the middle band - the same thing they were most likely already getting.
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS detail_level TEXT NOT NULL DEFAULT 'standard'",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS render_attempts INTEGER NOT NULL DEFAULT 0",
+  // Null on every existing row, which reads as "never tried" and lets the
+  // sweep pick it up at once - the right answer for anything stuck today.
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS visitor TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''",
@@ -322,6 +330,8 @@ function rowToOrder(row) {
     generationStatus: row.generation_status || 'idle',
     subjectType: row.subject_type || 'kid',
     detailLevel: row.detail_level || 'standard',
+    renderAttempts: row.render_attempts || 0,
+    lastAttemptAt: row.last_attempt_at ? new Date(row.last_attempt_at).toISOString() : null,
     visitor: row.visitor || '',
     source: row.source || '',
     campaign: row.campaign || '',
@@ -343,6 +353,11 @@ async function saveOrder(order) {
       paid: false,
       accessToken,
       submittedAt: new Date().toISOString(),
+      // Spelled out rather than left undefined: Postgres hands these back as 0
+      // and null, and the two stores disagreeing is how a rule that holds in a
+      // test stops holding in production.
+      renderAttempts: 0,
+      lastAttemptAt: null,
       ...order
     };
     memoryOrders.push(saved);
@@ -870,32 +885,79 @@ async function purgeOldOrders(days) {
 // where they stopped. Orders that have already burned through maxAttempts are
 // left alone: something about them is broken, and retrying forever would just
 // spend money on the same failure.
-async function resumableOrders(maxAttempts) {
+//
+// "Has a photo" means the single photo column OR a cast in people, each person
+// carrying their own. A family book stores nothing in photo - the images live
+// in people - so for a long time this query could not see one at all. They were
+// started once by the Stripe webhook and, if that attempt failed, never retried
+// by anything, ever. Not capped at five: one.
+//
+// Attempts are also spaced out. Counting five tries a minute apart is not five
+// chances, it is one bad minute: an OpenAI outage of a quarter of an hour used
+// to burn through every attempt an order had and leave it stranded after the
+// outage cleared. Each attempt now waits twice as long as the last, so five of
+// them span about half an hour and an order is still alive at the end of a
+// wobble rather than written off during it.
+async function resumableOrders(maxAttempts, backoffMinutes) {
   const cap = Number(maxAttempts) > 0 ? Number(maxAttempts) : 5;
+  const base = Number(backoffMinutes) > 0 ? Number(backoffMinutes) : 2;
+  const hasImages = (o) => Boolean(o.photo) || Boolean(o.people && o.people.length);
+  const dueAt = (o) => {
+    const attempts = o.renderAttempts || 0;
+    if (!attempts || !o.lastAttemptAt) return 0;
+    return new Date(o.lastAttemptAt).getTime() + base * Math.pow(2, attempts) * 60000;
+  };
   if (!usingPostgres) {
+    const now = Date.now();
     return memoryOrders
-      .filter((o) => o.paid && o.generationStatus !== 'done' && o.photo
-        && (o.renderAttempts || 0) < cap)
+      .filter((o) => o.paid && o.generationStatus !== 'done' && hasImages(o)
+        && (o.renderAttempts || 0) < cap && dueAt(o) <= now)
       .map((o) => o.id);
   }
   const { rows } = await pool.query(
     'SELECT id FROM orders '
     + "WHERE paid = TRUE AND generation_status <> 'done' "
-    + 'AND photo IS NOT NULL AND render_attempts < $1 ORDER BY id',
-    [cap]);
+    + 'AND (photo IS NOT NULL OR people IS NOT NULL) '
+    + 'AND render_attempts < $1 '
+    + 'AND (last_attempt_at IS NULL OR render_attempts = 0 '
+    + "     OR last_attempt_at < NOW() - ($2 * INTERVAL '1 minute' * POWER(2, render_attempts))) "
+    + 'ORDER BY id',
+    [cap, base]);
   return rows.map((r) => r.id);
 }
 
-// Counted before each attempt, not after, so an order that crashes the process
-// every time still runs out of attempts instead of looping forever.
-async function bumpRenderAttempts(id) {
+// Pulls a waiting order forward by moving its last attempt into the past, so
+// the sweep stops backing off and takes it on the next pass. Written for the
+// tests, which cannot wait half an hour to watch a back-off expire, and equally
+// the thing to reach for when an order is sitting out a wait it does not
+// deserve - after a provider outage clears, say.
+async function backdateLastAttempt(id, minutes) {
+  const mins = Number(minutes) || 0;
   if (!usingPostgres) {
     const o = memoryOrders.find((x) => x.id === Number(id));
-    if (o) o.renderAttempts = (o.renderAttempts || 0) + 1;
+    if (o) o.lastAttemptAt = new Date(Date.now() - mins * 60000).toISOString();
     return;
   }
   await pool.query(
-    'UPDATE orders SET render_attempts = render_attempts + 1 WHERE id = $1', [Number(id)]);
+    "UPDATE orders SET last_attempt_at = NOW() - ($2 * INTERVAL '1 minute') WHERE id = $1",
+    [Number(id), mins]);
+}
+
+// Counted before each attempt, not after, so an order that crashes the process
+// every time still runs out of attempts instead of looping forever. The time is
+// stamped in the same write, because it is what resumableOrders backs off from.
+async function bumpRenderAttempts(id) {
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(id));
+    if (o) {
+      o.renderAttempts = (o.renderAttempts || 0) + 1;
+      o.lastAttemptAt = new Date().toISOString();
+    }
+    return;
+  }
+  await pool.query(
+    'UPDATE orders SET render_attempts = render_attempts + 1, last_attempt_at = NOW() WHERE id = $1',
+    [Number(id)]);
 }
 
 async function countOrders() {
@@ -1244,6 +1306,7 @@ module.exports = {
   purgeOldOrders,
   resumableOrders,
   bumpRenderAttempts,
+  backdateLastAttempt,
   savePage,
   listPages,
   saveBookPdf,
