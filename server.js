@@ -1196,6 +1196,81 @@ const PHOTO_USE = 'Use the reference photo only for the faces, hair and features
 // single-subject wording is load-bearing and has been through enough already.
 const PHOTO_USE_MANY = 'Use the reference photos only for faces, hair and features. Do not copy any of their poses, framing, backgrounds or camera angles: this page is a new drawing of the same people somewhere else, not a photo traced over.';
 
+// Nothing in the prompt ever said what anybody was wearing. PHOTO_USE demotes
+// the photo to "faces, hair and features", but a model given no wardrobe still
+// has only one place to look, so it copied the clothes out of the snapshot:
+// Owen's whole Adventure book is fifteen pages of the same t-shirt and shorts.
+// The only costume that ever turned up was one a scene line happened to name -
+// the cape on the four Superhero pages that mention a cape, the helmet on
+// Firefighter page one - which is exactly what "only a couple of the pictures
+// do it" looks like from the outside. The theme is what the book is sold on, so
+// the outfit is stated on every page now rather than left to the scene text.
+//
+// Written as plain shapes a child can color: no logos, no emblems with anything
+// inside them, no lettering. BASE_STYLE already forbids all three and the two
+// instructions must not argue with each other.
+//
+// "from" is the first scene index that wears it. It is 1 for Superhero, whose
+// page one is the child finding the cape - the story is the costume arriving,
+// and it cannot arrive if it is already on. Every other theme wears it from
+// page one. Portrait and Family Keepsake are deliberately absent: one is the
+// child as themselves and the other is home life, and their own clothes are
+// the right answer for both.
+const THEME_OUTFITS = {
+  'Superhero': {
+    from: 1,
+    outfit: 'a superhero costume - a close-fitting long-sleeved suit, a plain oval emblem '
+      + 'shape on the chest with nothing at all drawn inside it, a long cape fastened at both '
+      + 'shoulders, a wide belt, tall boots and a small eye mask'
+  },
+  'Adventure scene': {
+    from: 0,
+    outfit: 'an explorer outfit - a wide-brimmed safari hat, a short-sleeved shirt with two '
+      + 'buttoned chest pockets, cargo shorts, long socks and sturdy lace-up hiking boots'
+  },
+  'Fairy tale': {
+    from: 0,
+    outfit: 'a storybook outfit - a hooded travelling cloak fastened at the throat, a simple '
+      + 'belted tunic or dress, and soft ankle boots'
+  },
+  'Firefighter': {
+    from: 0,
+    outfit: 'a firefighter uniform - a helmet with a wide brim at the back, a heavy turnout '
+      + 'coat with one broad plain band around the chest and one around each sleeve, matching '
+      + 'trousers and tall rubber boots'
+  },
+  'Police Officer': {
+    from: 0,
+    outfit: 'a police uniform - a peaked cap, a buttoned shirt with shoulder straps and two '
+      + 'chest pockets, a plain star-shaped badge with nothing written on it, a duty belt and '
+      + 'long trousers'
+  },
+  'Doctor': {
+    from: 0,
+    outfit: 'a doctor\'s outfit - a knee-length white coat worn open over plain scrubs, a '
+      + 'stethoscope hanging around the neck, and plain flat shoes'
+  },
+  'Grandparent Garden': {
+    from: 0,
+    outfit: 'gardening clothes - a wide-brimmed sun hat, a work apron with one big front '
+      + 'pocket, sleeves rolled to the elbow, gardening gloves and rubber boots'
+  }
+};
+
+// The line itself. Two jobs, and the second is the one that was missing: say
+// what to wear, then say out loud that the photo does not get a vote on it.
+// "on every page of this book" is there because each page is drawn by a
+// separate call that cannot see the others, so consistency has to be asked for
+// in every one of them.
+function wardrobeLine(theme, sceneIndex, plural, subject) {
+  const dressing = THEME_OUTFITS[theme];
+  if (!dressing || sceneIndex < dressing.from) return '';
+  return ` Wardrobe: ${subject} ${plural ? 'are' : 'is'} wearing ${dressing.outfit}.`
+    + ' This is the same outfit on every page of this book.'
+    + ' Ignore the clothing in the reference photo completely - the photo is for faces,'
+    + ' hair and features only, never for what anybody is wearing.';
+}
+
 // Without a camera direction the image model falls back to the same head-on
 // portrait every time, so a whole book came back looking like a page of
 // passport photos. buildPrompt walks this list with sceneIndex, and every theme
@@ -1526,6 +1601,7 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people, 
   const who = isFamily ? castLine(cast) : consistencyLine(childCount, subjectType);
   let prompt = `${BASE_STYLE} ${who} ${isFamily ? PHOTO_USE_MANY : PHOTO_USE} Scene: ${scene}.`;
   prompt += ` Camera: ${SHOTS[sceneIndex % SHOTS.length]}.`;
+  prompt += wardrobeLine(theme, sceneIndex, isFamily || childCount > 1, subject);
   if (notes && notes.trim()) {
     prompt += ` Also incorporate this detail where it fits naturally: ${notes.trim()}.`;
   }
@@ -2780,4 +2856,4 @@ if (require.main === module) {
 
 module.exports = { app, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
-  rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
+  rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
