@@ -313,37 +313,40 @@ async function main() {
     return windowLabel(p.start, p.end, TZ);
   };
 
-  // 08:00 Thursday in New York is 12:00 UTC while daylight time is on.
-  check('the Thursday 8am run closes the week that just ended',
-    label('2026-09-24T12:00:00Z'), 'Thu, Sep 17 00:00 to Wed, Sep 23 23:59');
+  // 08:00 Saturday in New York is 12:00 UTC while daylight time is on.
+  check('the Saturday 8am run closes the week that just ended',
+    label('2026-09-26T12:00:00Z'), 'Sat, Sep 19 00:00 to Fri, Sep 25 23:59');
   // Running it late must not silently pay a different week.
-  check('running it on Friday instead reports the same week',
-    label('2026-09-25T12:00:00Z'), 'Thu, Sep 17 00:00 to Wed, Sep 23 23:59');
-  check('and still the same on Wednesday night, one hour before close',
-    label('2026-09-30T23:00:00Z'), 'Thu, Sep 17 00:00 to Wed, Sep 23 23:59');
-  check('five minutes past midnight Thursday, it has rolled on',
-    label('2026-10-01T04:05:00Z'), 'Thu, Sep 24 00:00 to Wed, Sep 30 23:59');
+  check('running it on Sunday instead reports the same week',
+    label('2026-09-27T12:00:00Z'), 'Sat, Sep 19 00:00 to Fri, Sep 25 23:59');
+  // 23:00 Friday EDT is 03:00 UTC Saturday - the UTC date has already rolled
+  // over, the creators' week has not.
+  check('and still the same on Friday night, one hour before close',
+    label('2026-10-03T03:00:00Z'), 'Sat, Sep 19 00:00 to Fri, Sep 25 23:59');
+  check('five minutes past midnight Saturday, it has rolled on',
+    label('2026-10-03T04:05:00Z'), 'Sat, Sep 26 00:00 to Fri, Oct 2 23:59');
 
   // The week containing the end of US daylight saving is 169 hours long. A
   // window built from a flat seven-times-86400 would end an hour early and
-  // drop an hour of Wednesday night sales.
-  const dst = payPeriod(new Date('2026-11-05T13:00:00Z'), TZ);
+  // drop an hour of Friday night sales. Clocks go back Sunday Nov 1, inside
+  // the week Sat Oct 31 to Fri Nov 6, closed by the 08:00 EST run on Nov 7.
+  const dst = payPeriod(new Date('2026-11-07T13:00:00Z'), TZ);
   check('the week that contains the clock change is a real week, not 168 hours',
     (dst.end - dst.start) / 3600, 169);
   check('and it still starts and ends at local midnight',
-    label('2026-11-05T13:00:00Z'), 'Thu, Oct 29 00:00 to Wed, Nov 4 23:59');
+    label('2026-11-07T13:00:00Z'), 'Sat, Oct 31 00:00 to Fri, Nov 6 23:59');
 
   // A sale made after the week closed belongs to next week's payout. Without
-  // an upper bound it would be paid now and again next Thursday.
+  // an upper bound it would be paid now and again next Saturday.
   const periodQuery = [];
   const periodRun = await runReport(['--period'], { ...FIXTURE, asked: periodQuery },
-    '2026-09-24T12:00:00Z');
+    '2026-09-26T12:00:00Z');
   check('the pay week asks Stripe for an upper bound',
-    periodQuery[0].get('created[lt]'), String(payPeriod(new Date('2026-09-24T12:00:00Z'), TZ).end));
-  check('and a lower bound that is the Thursday midnight',
-    periodQuery[0].get('created[gte]'), String(payPeriod(new Date('2026-09-24T12:00:00Z'), TZ).start));
+    periodQuery[0].get('created[lt]'), String(payPeriod(new Date('2026-09-26T12:00:00Z'), TZ).end));
+  check('and a lower bound that is the Saturday midnight',
+    periodQuery[0].get('created[gte]'), String(payPeriod(new Date('2026-09-26T12:00:00Z'), TZ).start));
   check('the heading names the week, not a day count',
-    /Pay week  Thu, Sep 17 00:00 to Wed, Sep 23 23:59/.test(periodRun.out.join('\n')), true);
+    /Pay week  Sat, Sep 19 00:00 to Fri, Sep 25 23:59/.test(periodRun.out.join('\n')), true);
 
   const rolling = [];
   await runReport([], { ...FIXTURE, asked: rolling }, '2026-09-24T12:00:00Z');

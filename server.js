@@ -386,7 +386,7 @@ const CREATOR_COUPON = process.env.CREATOR_COUPON || 'creatortrack';
 // 20, not 25. Jerrell negotiated 25 and is the only one on it; every creator
 // who signs up through the form is on 20, which is what the payout report has
 // always defaulted to. Setting this to 25 would quietly promise every new
-// creator a rate the Thursday report does not pay them, and the first anyone
+// creator a rate the Saturday report does not pay them, and the first anyone
 // would hear of it is a creator who counted.
 const CREATOR_RATE_PERCENT = parseInt(process.env.CREATOR_RATE_PERCENT, 10) || 20;
 // One a day per visitor, not three. That number was set when a creator code
@@ -2602,11 +2602,11 @@ async function sendAlert({ level, subject, lines }) {
 }
 
 // ---------------------------------------------------------------------------
-// The Thursday payout report, emailed.
+// The Saturday payout report, emailed.
 //
 // This used to be a scheduled task on Jonathan's computer, because that is
 // where the Stripe key lives. Which meant the report only ran if the laptop
-// happened to be awake at 8am on a Thursday - and he drives a truck. A
+// happened to be awake at 8am on a Saturday - and he drives a truck. A
 // payout report that silently does not run on the morning people are owed
 // money is worse than no report, because nothing tells you it did not run.
 //
@@ -2615,8 +2615,8 @@ async function sendAlert({ level, subject, lines }) {
 // reads it on his phone.
 const PAYOUT_REPORT_TZ = process.env.PAYOUT_REPORT_TZ || 'America/New_York';
 const PAYOUT_REPORT_HOUR = parseInt(process.env.PAYOUT_REPORT_HOUR, 10) || 8;
-// Thursday, with Sunday as 0 - the morning after the pay week closes.
-const PAYOUT_REPORT_DOW = 4;
+// Saturday, with Sunday as 0 - the morning after the pay week closes.
+const PAYOUT_REPORT_DOW = 6;
 // Jerrell negotiated 25 and is the only exception. Anyone else is on the
 // CREATOR_RATE_PERCENT default, which the sign-up form also writes into each
 // code's metadata. Kept as an env var so a second exception does not need a
@@ -2675,7 +2675,7 @@ async function maybeSendPayoutReport(at = new Date()) {
     report = await runPayoutReport(at);
   } catch (err) {
     // Loud, and to the same inbox. A payout report that failed is itself the
-    // thing he needs to know on a Thursday morning.
+    // thing he needs to know on a Saturday morning.
     console.error('Payout report failed:', err.message);
     await sendAlert({
       level: 'WARN',
