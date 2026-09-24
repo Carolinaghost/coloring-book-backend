@@ -69,6 +69,20 @@ const IMAGES_PER_MIN = parseInt(process.env.OPENAI_IMAGES_PER_MIN, 10) || 45;
 // for as long as you like. Nobody can steal a book that way (only scenes 1 and
 // 2 are ever free) but every one of those is an image we pay OpenAI to draw.
 const FREE_PREVIEWS_PER_IP = parseInt(process.env.FREE_PREVIEWS_PER_IP, 10) || 8;
+// The style strip counts against its own allowance, not the one above.
+//
+// Both ration the same thing - free images - but they are not the same thing to
+// the business. The Step 3 preview belongs to an order somebody is part way
+// through placing; the strip is drawn automatically for anyone who drops a
+// photo on the page. Sharing one pool meant two automatic strips could spend
+// six of eight and leave a real customer unable to see the preview attached to
+// their own order. The person who never asked for anything got to starve the
+// person about to pay.
+//
+// Twelve is three runs of four. Generous enough that a household or an office
+// behind one address does not lock itself out in a minute, small enough that it
+// is still a cap.
+const FREE_STRIP_IMAGES_PER_IP = parseInt(process.env.FREE_STRIP_IMAGES_PER_IP, 10) || 12;
 // Whose midnight the day ends at. The customer's, not the server's.
 const PREVIEW_DAY_TZ = process.env.PREVIEW_DAY_TZ || 'America/New_York';
 const FREE_PREVIEWS_PER_HOUR = parseInt(process.env.FREE_PREVIEWS_PER_HOUR, 10) || 240;
@@ -2041,17 +2055,46 @@ function previewDay(at = new Date()) {
   }).format(at);
 }
 
-async function takeFreePreview(ip, count = 1) {
+// kind picks which allowance to spend from: 'step3' for the preview attached to
+// an order, 'strip' for the four styles drawn on upload. The site-wide hourly
+// window is deliberately shared by both - that one exists to blunt a spike in
+// what we spend at OpenAI, and a spike is a spike whichever door it came in by.
+// How long a free-image allowance lasts before it comes back.
+//
+// A daily reset handed the same address eight images every morning, which over
+// a week is most of a book for nothing. Three days is the same cap spread
+// thinner.
+//
+// The block is anchored to the calendar, not to when somebody first turned up:
+// every address shares the same boundaries, counted from the epoch. That keeps
+// it to one stored date and no per-visitor start time - at the cost that a
+// visitor arriving on the last day of a block gets their reset the next
+// morning. A strict three days from first use would need the window start
+// stored per row, which is a bigger change than this is worth.
+const QUOTA_WINDOW_DAYS = Math.max(1, parseInt(process.env.QUOTA_WINDOW_DAYS, 10) || 3);
+
+// The date that names the current block, in the visitor's own timezone. Stored
+// in the same DATE column a single day used to be, so nothing about the table
+// changes - only which dates ever appear in it.
+function quotaWindow(at = new Date()) {
+  const local = previewDay(at);
+  const dayNumber = Math.floor(Date.parse(local + 'T00:00:00Z') / 86400000);
+  const start = Math.floor(dayNumber / QUOTA_WINDOW_DAYS) * QUOTA_WINDOW_DAYS;
+  return new Date(start * 86400000).toISOString().slice(0, 10);
+}
+
+async function takeFreePreview(ip, count = 1, kind = 'step3') {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
   const want = Math.max(1, Number(count) || 1);
+  const ceiling = kind === 'strip' ? FREE_STRIP_IMAGES_PER_IP : FREE_PREVIEWS_PER_IP;
 
   if (now - sitePreviewWindow.start > hour) sitePreviewWindow = { start: now, count: 0 };
   if (sitePreviewWindow.count + want > FREE_PREVIEWS_PER_HOUR) return 'site';
 
   let quota;
   try {
-    quota = await db.takePreviewQuota(ip, previewDay(), FREE_PREVIEWS_PER_IP, want);
+    quota = await db.takePreviewQuota(ip, quotaWindow(), ceiling, want, kind);
   } catch (err) {
     // The database being unreachable must not stop a visitor seeing their own
     // child drawn. Fail open, loudly: the site-wide hourly cap above is still
@@ -2077,9 +2120,9 @@ async function takeFreePreview(ip, count = 1) {
 //
 // The site-wide hourly window is deliberately NOT refunded. That one exists to
 // blunt a spike, and a spike of failing requests is still a spike.
-async function giveBackFreePreview(ip, count = 1) {
+async function giveBackFreePreview(ip, count = 1, kind = 'step3') {
   try {
-    await db.refundPreviewQuota(ip, previewDay(), Math.max(1, Number(count) || 1));
+    await db.refundPreviewQuota(ip, quotaWindow(), Math.max(1, Number(count) || 1), kind);
   } catch (err) {
     // Worth knowing about, not worth turning one failure into two.
     console.error('Could not give back a free preview -', err.message);
@@ -2088,7 +2131,11 @@ async function giveBackFreePreview(ip, count = 1) {
 
 // Yesterday's counters are dead weight. Once a day, quietly.
 setInterval(() => {
-  db.purgeOldPreviewQuota().catch((err) =>
+  // Keep several windows' worth. The row that names the CURRENT window carries
+  // the date the window started, which is already days in the past - purging on
+  // a fixed seven days would, with a long enough window, delete the counter
+  // somebody is still spending against and hand them a free reset.
+  db.purgeOldPreviewQuota(Math.max(7, QUOTA_WINDOW_DAYS * 3)).catch((err) =>
     console.error('Could not tidy old preview counters:', err.message));
 }, 24 * 60 * 60 * 1000).unref();
 
@@ -2176,7 +2223,7 @@ app.post('/style-preview', upload.fields([
     // All four or none. Three tiles and a failure is worse than a clean stop,
     // and it is the stop that sends the visitor on to step 3.
     const visitorIp = clientIp(req);
-    const blocked = await takeFreePreview(visitorIp, tiles.length);
+    const blocked = await takeFreePreview(visitorIp, tiles.length, 'strip');
     if (blocked === 'visitor') {
       // Not a generic error. The site reads this and moves the customer into
       // step 3 to name their child and choose a theme, which is where they were
@@ -2185,7 +2232,7 @@ app.post('/style-preview', upload.fields([
         error: 'You have used up today\'s free previews.',
         quotaExhausted: true,
         advanceToNextStep: true,
-        freePreviewsPerDay: FREE_PREVIEWS_PER_IP
+        freePreviewsPerDay: FREE_STRIP_IMAGES_PER_IP
       });
     }
     if (blocked === 'site') {
@@ -2221,7 +2268,7 @@ app.post('/style-preview', upload.fields([
     // visitor an image and handed them no picture.
     const missed = drawn.filter((t) => !t.image).length;
     if (missed) {
-      await giveBackFreePreview(chargedTo, missed);
+      await giveBackFreePreview(chargedTo, missed, 'strip');
       charged -= missed;
     }
     chargedTo = null;
@@ -2232,7 +2279,7 @@ app.post('/style-preview', upload.fields([
     res.json({ audience, styles: drawn });
   } catch (err) {
     console.error('Style preview failed:', err);
-    if (chargedTo && charged) await giveBackFreePreview(chargedTo, charged);
+    if (chargedTo && charged) await giveBackFreePreview(chargedTo, charged, 'strip');
     res.status(500).json({ error: 'Could not draw the preview.' });
   }
 });
@@ -3009,4 +3056,4 @@ if (require.main === module) {
 
 module.exports = { app, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
-  rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
+  rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };

@@ -125,8 +125,13 @@ const CREATE_EVENTS_SQL = `
   CREATE TABLE IF NOT EXISTS preview_quota (
     ip TEXT NOT NULL,
     day DATE NOT NULL,
+    -- Which allowance this row counts. 'step3' is the free preview attached to
+    -- a real order; 'strip' is the four styles drawn automatically on upload.
+    -- They are separate rows so heavy use of one can never starve the other -
+    -- and it is step3 that leads to somebody paying.
+    kind TEXT NOT NULL DEFAULT 'step3',
     used INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (ip, day)
+    PRIMARY KEY (ip, day, kind)
   );
 
   CREATE TABLE IF NOT EXISTS events (
@@ -233,6 +238,21 @@ const MIGRATIONS = [
   // Null on every existing row, which reads as "never tried" and lets the
   // sweep pick it up at once - the right answer for anything stuck today.
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ",
+  // Existing rows are all Step 3 previews, which is what the default says.
+  "ALTER TABLE preview_quota ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'step3'",
+  // And the key has to grow with it, or the two allowances collide on (ip, day)
+  // and the separation is decorative. Rebuilt only when it is not already three
+  // columns wide, so running this twice costs nothing.
+  `DO $$
+   BEGIN
+     IF NOT EXISTS (
+       SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid
+        WHERE c.relname = 'preview_quota' AND i.indisprimary AND i.indnatts = 3
+     ) THEN
+       ALTER TABLE preview_quota DROP CONSTRAINT IF EXISTS preview_quota_pkey;
+       ALTER TABLE preview_quota ADD PRIMARY KEY (ip, day, kind);
+     END IF;
+   END $$;`,
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS visitor TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''",
@@ -1241,28 +1261,28 @@ async function purgeOldEvents(days) {
 // arrive and the fourth fail, and be charged for the lot. All-or-nothing is
 // also what makes the arithmetic in the spec true - eight allowance, four a
 // run, two runs.
-async function takePreviewQuota(ip, day, limit, count = 1) {
+async function takePreviewQuota(ip, day, limit, count = 1, kind = 'step3') {
   const want = Math.max(1, Number(count) || 1);
   if (!usingPostgres) {
-    const key = `${ip}|${day}`;
+    const key = `${ip}|${day}|${kind}`;
     const already = memoryPreviewQuota.get(key) || 0;
     if (already + want > limit) return { allowed: false, used: already, left: Math.max(0, limit - already) };
     memoryPreviewQuota.set(key, already + want);
     return { allowed: true, used: already + want, left: limit - (already + want) };
   }
   const { rows } = await pool.query(
-    `INSERT INTO preview_quota (ip, day, used) VALUES ($1, $2, $4)
-       ON CONFLICT (ip, day) DO UPDATE SET used = preview_quota.used + $4
+    `INSERT INTO preview_quota (ip, day, kind, used) VALUES ($1, $2, $5, $4)
+       ON CONFLICT (ip, day, kind) DO UPDATE SET used = preview_quota.used + $4
        WHERE preview_quota.used + $4 <= $3
      RETURNING used`,
-    [ip, day, limit, want]
+    [ip, day, limit, want, kind]
   );
   if (rows.length) return { allowed: true, used: rows[0].used, left: limit - rows[0].used };
   // Refused. Say how many are actually left, because the difference between
   // "none at all" and "two, but you asked for four" is what the site needs to
   // decide whether to send the visitor on to step 3.
   const { rows: seen } = await pool.query(
-    'SELECT used FROM preview_quota WHERE ip = $1 AND day = $2', [ip, day]);
+    'SELECT used FROM preview_quota WHERE ip = $1 AND day = $2 AND kind = $3', [ip, day, kind]);
   const used = seen.length ? seen[0].used : 0;
   return { allowed: false, used, left: Math.max(0, limit - used) };
 }
@@ -1279,10 +1299,10 @@ async function takePreviewQuota(ip, day, limit, count = 1) {
 // image - there is nothing to harvest by forcing failures - and the site-wide
 // hourly cap is not refunded at all, so what OpenAI can be made to spend in an
 // hour is unchanged.
-async function refundPreviewQuota(ip, day, count = 1) {
+async function refundPreviewQuota(ip, day, count = 1, kind = 'step3') {
   const back = Math.max(1, Number(count) || 1);
   if (!usingPostgres) {
-    const key = `${ip}|${day}`;
+    const key = `${ip}|${day}|${kind}`;
     const used = memoryPreviewQuota.get(key) || 0;
     const now = Math.max(0, used - back);
     memoryPreviewQuota.set(key, now);
@@ -1292,9 +1312,9 @@ async function refundPreviewQuota(ip, day, count = 1) {
   // times than the images were taken.
   const { rows } = await pool.query(
     `UPDATE preview_quota SET used = GREATEST(used - $3, 0)
-      WHERE ip = $1 AND day = $2
+      WHERE ip = $1 AND day = $2 AND kind = $4
      RETURNING used`,
-    [ip, day, back]
+    [ip, day, back, kind]
   );
   return rows.length ? rows[0].used : 0;
 }
