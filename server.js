@@ -2149,10 +2149,11 @@ app.post('/style-preview', upload.fields([
     if (!singlePhoto && !familyPhotos.length) {
       return res.status(400).json({ error: 'No photo uploaded.' });
     }
-    if (!CAN_CALL_OPENAI) {
-      return res.status(500).json({ error: 'Server is missing its OpenAI API key.' });
-    }
-
+    // What was sent is checked before whether we can draw it. The other way
+    // round, a request with its photos and names out of step comes back "server
+    // is missing its OpenAI API key", which sends whoever is debugging it to
+    // the wrong place entirely. /convert has always validated first; this now
+    // matches it.
     let cast = [];
     if (req.body.people) {
       try { cast = cleanPeople(JSON.parse(req.body.people)); }
@@ -2162,6 +2163,9 @@ app.post('/style-preview', upload.fields([
       return res.status(400).json({
         error: `Send one name per photo: ${familyPhotos.length} photo(s) but ${cast.length} name(s).`
       });
+    }
+    if (!CAN_CALL_OPENAI) {
+      return res.status(500).json({ error: 'Server is missing its OpenAI API key.' });
     }
 
     const audience = req.body.audience === 'adult' ? 'adult' : 'kid';
