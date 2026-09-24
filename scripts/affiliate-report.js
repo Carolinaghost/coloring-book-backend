@@ -14,8 +14,8 @@
 //   node scripts/affiliate-report.js --csv
 //
 // Options:
-//   --period      the pay week that just ended: Thursday 00:00 to Wednesday
-//                 23:59:59.999 local time. This is what the Thursday morning
+//   --period      the pay week that just ended: Saturday 00:00 to Friday
+//                 23:59:59.999 local time. This is what the Saturday morning
 //                 run uses, and what the creators were promised.
 //   --tz <zone>   which local time --period means (default America/New_York)
 //   --days <n>    a rolling window ending now, for looking around (default 7)
@@ -40,14 +40,14 @@
 
 const PAY_ON = 'paid';   // 'paid' or 'list'
 
-// Creators are told: paid every Friday, for everything that sold through the
-// Wednesday before. So the week being paid for is a fixed calendar block in
+// Creators are told: the week runs Saturday 12:00am to Friday 11:59pm, and
+// it is paid the Friday after it closes. So the week being paid for is a fixed calendar block in
 // THEIR day, not a rolling seven days ending whenever the report happened to
 // be run. Those two are not the same, and the gap between them is a sale that
-// gets paid twice or never - a rolling window run at 08:00 Thursday misses
-// everything sold between 08:00 last Thursday and midnight, and pays again for
-// everything after 08:00 last Wednesday.
-const PAY_WEEK_STARTS_ON = 4;             // Thursday, with Sunday as 0
+// gets paid twice or never - a rolling window run at 08:00 Saturday misses
+// everything sold between 08:00 last Saturday and midnight, and pays again for
+// everything after 08:00 last Friday.
+const PAY_WEEK_STARTS_ON = 6;             // Saturday, with Sunday as 0
 const DEFAULT_TZ = 'America/New_York';
 
 const KEY = process.env.STRIPE_SECRET_KEY;
@@ -280,9 +280,9 @@ function localMidnight({ year, month, day }, tz) {
   return at;
 }
 
-// The pay week that has finished: Thursday 00:00 up to, but not including, the
-// following Thursday 00:00 - which is Wednesday 23:59:59.999 as promised.
-// Run at 08:00 on Thursday, "the most recent Thursday midnight" is this
+// The pay week that has finished: Saturday 00:00 up to, but not including, the
+// following Saturday 00:00 - which is Friday 23:59:59.999 as promised.
+// Run at 08:00 on Saturday, "the most recent Saturday midnight" is this
 // morning, so the week it closes is the one just gone.
 function payPeriod(now, tz) {
   const here = localParts(now, tz);
@@ -296,7 +296,7 @@ function payPeriod(now, tz) {
   return { start: Math.floor(start / 1000), end: Math.floor(end / 1000) };
 }
 
-// Wednesday, not the Thursday that the exclusive end lands on.
+// Friday, not the Saturday that the exclusive end lands on.
 function windowLabel(startSec, endSec, tz) {
   const day = (sec) => new Intl.DateTimeFormat('en-US', {
     timeZone: tz, weekday: 'short', month: 'short', day: 'numeric'
@@ -304,7 +304,7 @@ function windowLabel(startSec, endSec, tz) {
   return `${day(startSec)} 00:00 to ${day(endSec - 1000)} 23:59`;
 }
 
-// `print` and `warn` are how the backend borrows this. The Thursday email runs
+// `print` and `warn` are how the backend borrows this. The Saturday email runs
 // the very same function the command line does and collects the lines instead
 // of printing them - so what lands in Jonathan's inbox cannot drift from what
 // he sees when he runs it himself, which is the only way two versions of a
@@ -375,7 +375,7 @@ async function main(deps = {}) {
   // not decide what counts as a sale - payment_status does, in tally().
   const sessionQuery = { 'created[gte]': since, status: 'complete' };
   // Without this the report would sweep up sales made after the period closed
-  // and pay them twice - once now, once again next Thursday.
+  // and pay them twice - once now, once again next Saturday.
   if (until) sessionQuery['created[lt]'] = until;
   const sessions = await listAll('/checkout/sessions', sessionQuery, io);
 

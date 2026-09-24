@@ -8,7 +8,7 @@
 // What this file is really guarding is money and identity, in that order.
 //
 // A creator's code decides who gets paid for a sale. Hand the same person two
-// codes and their own sales are split across both, and the Thursday report
+// codes and their own sales are split across both, and the Saturday report
 // pays them for one of the halves. Hand two people the same code and there is
 // no way afterwards to say whose sale it was. Both are unrecoverable once
 // somebody has posted the code to an audience, so both are checked here.
@@ -177,7 +177,7 @@ async function main() {
     check('and a link that carries it', first.body.link, 'https://crayonauts.com?c=jerrellcrump');
     // 20 is the standard rate. Jerrell's 25 is a negotiated exception and lives
     // in the payout report's --rates flag, not here. If this ever reads 25 again
-    // the form is promising a rate the Thursday report will not pay.
+    // the form is promising a rate the Saturday report will not pay.
     check('at the standard rate, which is 20 and not Jerrell\'s 25', first.body.ratePercent, 20);
     check('and does not claim they were already signed up', first.body.alreadySignedUp, false);
 
@@ -207,11 +207,17 @@ async function main() {
     check('and the free book code in it', sent[0].text.includes(freeCreates[0].code), true);
     // The pay week and the pay day are two different things and the proposal,
     // the creator page and this email all have to agree on both. The week
-    // closes Wednesday night; the money moves the Friday after.
+    // closes Friday night; the money moves the Friday after.
     check('it names the pay day, which is Friday',
       /paid the Friday after it closes/.test(sent[0].text), true);
-    check('and does not promise Thursday, which is only when the report runs',
-      /paid[^.]*Thursday/.test(sent[0].text), false);
+    check('and names the week the way creators.html does',
+      /The pay week runs Saturday 12:00am to Friday 11:59pm, US Eastern\./.test(sent[0].text), true);
+    check('in the HTML version too',
+      /The pay week runs Saturday 12:00am to Friday 11:59pm, US Eastern\./.test(sent[0].html), true);
+    check('and does not promise Saturday, which is only when the report runs',
+      /paid[^.]*Saturday/.test(sent[0].text), false);
+    check('nor the old Thursday-to-Wednesday week',
+      /Thursday|Wednesday/.test(sent[0].text + sent[0].html), false);
     // Bank details by email is the thing this whole design avoids. If that
     // sentence ever disappears, somebody will send a routing number back.
     check('and it tells them not to email bank details',
