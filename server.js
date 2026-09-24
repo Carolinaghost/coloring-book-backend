@@ -194,17 +194,27 @@ function requireAdmin(req, res) {
   return true;
 }
 
+// Same shape as the browser's own check (index.html's isValidEmail). Kept
+// here too because /checkout now trusts an email it receives straight from
+// the client, at the point real money is about to move.
+function isValidEmailServer(v) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || ''));
+}
+
 app.post('/orders', async (req, res) => {
   wakeUp();
   const { childName, childCount, email, theme, notes, thumb, pageCount } = req.body || {};
-  if (!childName || !email) {
-    return res.status(400).json({ error: 'Missing childName or email.' });
+  if (!childName) {
+    return res.status(400).json({ error: 'Missing childName.' });
   }
+  // Email is no longer required to see the free preview - only to unlock it.
+  // /checkout collects and validates the real address later; the column is
+  // NOT NULL, so an empty string (never null) holds the seat until then.
   try {
     const order = await db.saveOrder({
       childName: String(childName).slice(0, 200),
       childCount: Math.min(Math.max(parseInt(childCount, 10) || 1, 1), 3),
-      email: String(email).slice(0, 320),
+      email: email ? String(email).slice(0, 320) : '',
       theme: theme || 'Portrait',
       notes: String(notes || '').slice(0, 1000),
       thumb: thumb || null,
@@ -764,15 +774,31 @@ app.get('/creators', async (req, res) => {
 // the customer to. Called with the order id and the access token we handed the
 // browser when the order was created.
 app.post('/checkout', async (req, res) => {
-  const { orderId, token, product, code } = req.body || {};
+  const { orderId, token, product, code, email } = req.body || {};
   if (!STRIPE_SECRET_KEY) {
     return res.status(500).json({ error: 'Payments are not configured on the server.' });
   }
 
   try {
-    const order = await db.authorizeOrder(orderId, token);
+    let order = await db.authorizeOrder(orderId, token);
     if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
     if (order.paid) return res.status(409).json({ error: 'This order is already paid.' });
+
+    // Email now arrives here, at unlock, rather than at the free preview.
+    // An order already carrying one (an older browser that still sent it at
+    // /orders, or a repeat unlock attempt) keeps it; otherwise this request
+    // must supply a valid one before Stripe is ever contacted.
+    const incomingEmail = typeof email === 'string' ? email.trim() : '';
+    if (!order.email && !incomingEmail) {
+      return res.status(400).json({ error: 'Missing email.' });
+    }
+    if (incomingEmail && !isValidEmailServer(incomingEmail)) {
+      return res.status(400).json({ error: 'That email address does not look right.' });
+    }
+    if (incomingEmail && incomingEmail !== order.email) {
+      const updated = await db.updateOrderEmail(order.id, incomingEmail.slice(0, 320));
+      if (updated) order = updated;
+    }
 
     const isPrint = product === 'print';
     const isFamily = Array.isArray(order.people) && order.people.length > 1;
