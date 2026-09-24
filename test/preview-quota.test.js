@@ -22,7 +22,7 @@ process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'sk-not-a-real-key';
 delete process.env.DATABASE_URL;   // exercise the in-memory store
 
 const db = require('../db.js');
-const { app, previewDay, clientIp } = require('../server.js');
+const { app, previewDay, quotaWindow, clientIp } = require('../server.js');
 
 let pass = 0;
 const failures = [];
@@ -146,7 +146,10 @@ async function main() {
     await new Promise((r) => server.once('listening', r));
     const { port } = server.address();
     const visitor = '203.0.113.77';
-    const today = previewDay();
+    // The key the ROUTE writes under, which is the window the allowance runs
+    // in - no longer the calendar day. Probing previewDay() here read a row the
+    // route never touches, and the count came back one short.
+    const today = quotaWindow();
 
     const convert = async () => {
       const form = new FormData();
