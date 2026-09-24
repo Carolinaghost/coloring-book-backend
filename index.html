@@ -1,0 +1,1933 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Checkout logic changes often; a stale cached copy can show a customer an
+     old flow with no payment step. Always revalidate this page. -->
+<meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
+<title>Crayonauts — custom coloring books</title>
+<meta name="description" content="Turn a photo into a personalized 15-page coloring book starring whoever is in it. Personal or family - up to five people in one book. Ready in minutes, printed at home.">
+<link rel="canonical" href="https://crayonauts.com/">
+
+<!-- Meta pixel. Ads are judged on sales, not clicks, so the Purchase event
+     below carries the real dollar value of the book that was bought. Every
+     call goes through fbTrack(), which does nothing at all if the pixel
+     script was blocked - measurement must never be able to break checkout. -->
+<script>
+!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;
+n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
+t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,
+document,'script','https://connect.facebook.net/en_US/fbevents.js');
+fbq('init', '1760133305035577');
+fbq('track', 'PageView');
+</script>
+<noscript><img height="1" width="1" style="display:none"
+ src="https://www.facebook.com/tr?id=1760133305035577&ev=PageView&noscript=1" alt=""></noscript>
+
+<!-- What a pasted link looks like in a message, a post or a group chat. Without
+     these it is a bare URL; with them it is the before-and-after picture, which
+     is the whole pitch. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Crayonauts">
+<meta property="og:title" content="Crayonauts — custom coloring books from your photo">
+<meta property="og:description" content="Send one photo. Get a 15-page coloring book starring whoever is in it. Personal or family, up to five people in one book.">
+<meta property="og:url" content="https://crayonauts.com/">
+<meta property="og:image" content="https://crayonauts.com/og-image_1.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+
+<meta name="p:domain_verify" content="5f9544cae9a0fc83776ec3479b96bdbb">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Crayonauts — custom coloring books from your photo">
+<meta name="twitter:description" content="Send one photo. Get a 15-page coloring book starring whoever is in it.">
+<meta name="twitter:image" content="https://crayonauts.com/og-image_1.png">
+
+<link rel="icon" href="/favicon-32_1.png" sizes="32x32">
+<link rel="icon" href="/favicon-16_1.png" sizes="16x16">
+<link rel="apple-touch-icon" href="/apple-touch-icon_1.png">
+
+<!-- Bing Webmaster Tools verification. Do not remove after it verifies. -->
+<meta name="msvalidate.01" content="524D9F97AEDC40A4EBBEB9C22BC93A7C" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Karla:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #FBF6EA;
+    --card: #FFFFFF;
+    --ink: #2A2724;
+    --ink-soft: #6B6357;
+    --blue: #2F5FA8;
+    --blue-dark: #1F4479;
+    --orange: #E8622C;
+    --yellow: #F2AE3D;
+    --green: #4C8C5B;
+    --line: #DCD2B8;
+    --danger: #C1432B;
+    /* Straight off the logo kit, so the name in the header and the name in the
+       favicon are the same two colours. */
+    --brand-ink: #242636;
+    --brand-coral: #E85D4A;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    overflow-x: clip;
+    color: var(--ink);
+    font-family: 'Karla', sans-serif;
+    line-height: 1.55;
+    /* Warm colour wash plus a faint tile of coloring-book doodles. Fixed, so it
+       stays put while the page scrolls, and it sits under solid white cards so
+       nothing here fights with the text. */
+    background-color: var(--paper);
+    background-image:
+      radial-gradient(900px 520px at 8% -8%, rgba(242, 174, 61, 0.30), rgba(242, 174, 61, 0) 62%),
+      radial-gradient(820px 500px at 94% -4%, rgba(90, 150, 220, 0.24), rgba(90, 150, 220, 0) 64%),
+      radial-gradient(760px 560px at 50% 112%, rgba(76, 140, 91, 0.20), rgba(76, 140, 91, 0) 62%),
+      url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22300%22%20height%3D%22300%22%20viewBox%3D%220%200%20300%20300%22%3E%20%3Cg%20fill%3D%22none%22%20stroke%3D%22%232A2724%22%20stroke-width%3D%222.2%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20opacity%3D%220.07%22%3E%20%3Cpath%20d%3D%22M46%2030l7.5%2015.4%2017%202.5-12.3%2012%202.9%2016.9L46%2068.8%2030.9%2076.8l2.9-16.9-12.3-12%2017-2.5z%22%2F%3E%20%3Cpath%20d%3D%22M196%2044c0-9%207.3-16.2%2016.2-16.2%206.3%200%2011.7%203.6%2014.4%208.8%201.7-.9%203.6-1.4%205.6-1.4%206.8%200%2012.3%205.5%2012.3%2012.3S239%2059.8%20232.2%2059.8h-36.6c-6%200-10.8-4.9-10.8-10.9%200-3.5%201.7-6.6%204.3-8.6%22%2F%3E%20%3Cpath%20d%3D%22M136%20228c-5-5.6-13.6-5.6-17.8%200-4.2-5.6-12.8-5.6-17.8%200-4.8%205.3-3.7%2013.3%201.7%2018.2l16.1%2014.6%2016.1-14.6c5.4-4.9%206.5-12.9%201.7-18.2z%22%2F%3E%20%3Cpath%20d%3D%22M232%20168c0%2011-9%2021.6-18%2027-9-5.4-18-16-18-27a18%2018%200%200136%200z%22%2F%3E%20%3Cpath%20d%3D%22M214%20195l-2%207h8l-2-7%22%2F%3E%20%3Cpath%20d%3D%22M212%20202c1%208-6%2011-4%2018%22%2F%3E%20%3Cpath%20d%3D%22M124%20116l5.6%2011.5%2012.7%201.9-9.2%209%202.2%2012.6-11.3-6-11.3%206%202.2-12.6-9.2-9%2012.7-1.9z%22%2F%3E%20%3Cpath%20d%3D%22M24%20152c12-14%2024%2014%2036%200s24%2014%2036%200%22%2F%3E%20%3Cpath%20d%3D%22M214%20118c12-14%2024%2014%2036%200%22%2F%3E%20%3Cpath%20d%3D%22M62%20262c10-12%2022%2012%2032%200%22%2F%3E%20%3Ccircle%20cx%3D%22266%22%20cy%3D%22238%22%20r%3D%229%22%2F%3E%20%3Ccircle%20cx%3D%22166%22%20cy%3D%22286%22%20r%3D%226%22%2F%3E%20%3Ccircle%20cx%3D%2216%22%20cy%3D%22212%22%20r%3D%226%22%2F%3E%20%3C%2Fg%3E%3C%2Fsvg%3E");
+    background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+    background-attachment: fixed, fixed, fixed, fixed;
+    background-size: auto, auto, auto, 300px 300px;
+  }
+
+  .page { box-shadow: 0 6px 22px rgba(42, 39, 36, 0.06); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .page { transition: box-shadow 0.2s ease; }
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1, h2, h3 { font-family: 'Baloo 2', sans-serif; margin: 0; }
+  header { text-align: center; margin-bottom: 36px; padding-top: 6px; }
+  .tagline { color: var(--ink-soft); font-size: 17px; margin-top: 8px; }
+  /* The price used to live only inside the paywall, which is display:none until
+     somebody has uploaded a photo and had two pages drawn. So a visitor could
+     not find out what it cost without committing to an upload. It says it here
+     now, above the fold, before anything is asked of them. */
+  .pricing { margin-top: 14px; font-size: 17px; color: var(--ink); }
+  .pricing b { font-family: 'Baloo 2', sans-serif; font-size: 20px; }
+  .pricing .free { display: block; margin-top: 4px; font-size: 15px; color: var(--ink-soft); }
+  /* The gift line. Parents are not shopping for a coloring app, they are
+     shopping for a present - and a present is worth more than an app. */
+  .gift { margin-top: 12px; font-size: 18px; color: var(--brand-coral); font-family: 'Baloo 2', sans-serif; }
+
+  /* ---- the wordmark ----
+     The name is a coloring page halfway through being coloured: hollow bubble
+     letters, filled in from the left as far as the pencil has got. It says what
+     the product does before a word of the tagline is read.
+
+     Two stacked copies of the same text. The lower one is hollow outline, the
+     upper one is coral and clipped to wherever the pencil has reached. The
+     second copy is aria-hidden so it is not announced twice. */
+  .brand {
+    font-family: 'Baloo 2', sans-serif;
+    font-weight: 800;
+    font-size: clamp(40px, 11vw, 56px);
+    line-height: 1.06;
+    letter-spacing: 0.5px;
+  }
+  .wordmark { position: relative; display: inline-block; }
+  /* Room above for the pencil, which reaches over the cap line. */
+  .wordmark .letters { display: block; padding-top: 0.62em; }
+  .wordmark .colored {
+    position: absolute;
+    left: 0; top: 0;
+    /* 58% lands the boundary just after "Crayon", so the eye reads a word
+       being finished rather than a word cut in half. */
+    clip-path: inset(0 42% 0 0);
+    color: var(--brand-coral);
+  }
+
+  /* Without text-stroke the hollow copy would be invisible, so the outline
+     treatment is only applied where it is actually supported. Everywhere else
+     the name is simply solid ink - plain, but never missing. */
+  .brand { color: var(--brand-ink); }
+  @supports (-webkit-text-stroke: 1px black) {
+    .wordmark .letters { -webkit-text-stroke: 3px var(--brand-ink); paint-order: stroke fill; }
+    .wordmark .uncolored { color: transparent; }
+  }
+
+  /* Small enough to sit on the letters rather than bury them, and shifted back
+     by half its own width so the nib - not the pencil's left edge - is what
+     lands on the boundary. */
+  .wordmark .pencil {
+    position: absolute;
+    left: 58%;
+    /* Nib resting on the cap line, body angled up and away, so the pencil never
+       sits over a letter - the word stays readable at a glance, which matters
+       more than the pencil does. */
+    bottom: 0.60em;
+    width: 0.30em;
+    height: auto;
+    transform: translateX(-54%) rotate(18deg);
+    transform-origin: 50% 92%;
+    pointer-events: none;
+  }
+
+  /* Drawn in once on arrival, then left alone - a loop would pull the eye off
+     the page every few seconds. The fill and the pencil are separate elements,
+     so they share a duration and an easing curve to stay together. */
+  @media (prefers-reduced-motion: no-preference) {
+    .wordmark .colored { animation: wm-fill 1.5s cubic-bezier(.33,.1,.24,1) .25s backwards; }
+    .wordmark .pencil  { animation: wm-draw 1.5s cubic-bezier(.33,.1,.24,1) .25s backwards; }
+  }
+  @keyframes wm-fill {
+    from { clip-path: inset(0 100% 0 0); }
+    to   { clip-path: inset(0 42% 0 0); }
+  }
+  @keyframes wm-draw {
+    from { left: 0%; }
+    to   { left: 58%; }
+  }
+
+  .page {
+    background: var(--card);
+    border-radius: 18px;
+    border: 2px dashed var(--line);
+    padding: 28px;
+    margin-bottom: 28px;
+    position: relative;
+  }
+  .page h2 { font-size: 21px; margin-bottom: 4px; }
+  .step-label { color: var(--orange); font-weight: 700; font-size: 14px; margin-bottom: 2px; font-family: 'Baloo 2', sans-serif; }
+  .step-desc { color: var(--ink-soft); font-size: 14px; margin: 6px 0 18px; }
+
+  .dropzone {
+    border: 3px solid var(--blue);
+    border-radius: 14px;
+    padding: 30px 20px;
+    text-align: center;
+    cursor: pointer;
+    background: #F3F7FC;
+    transition: background 0.15s ease;
+  }
+  .dropzone:hover, .dropzone.drag { background: #E7F0FA; }
+  .dropzone svg { width: 46px; height: 46px; margin-bottom: 10px; }
+  .dropzone p { margin: 0; font-weight: 700; color: var(--blue-dark); font-family: 'Baloo 2', sans-serif; font-size: 16px; }
+  .dropzone span { color: var(--ink-soft); font-size: 13px; }
+  input[type=file] { display: none; }
+
+  .previews { display: flex; gap: 18px; margin-top: 20px; flex-wrap: wrap; }
+  .preview-box { flex: 1; min-width: 200px; text-align: center; }
+  .preview-box canvas, .preview-box img { width: 100%; border-radius: 10px; border: 1px solid var(--line); background: #fff; }
+  .preview-box p { font-size: 13px; color: var(--ink-soft); margin: 8px 0 0; }
+
+  .themes { display: flex; gap: 10px; flex-wrap: wrap; }
+  .theme-pill {
+    border: 2px solid var(--line);
+    background: #fff;
+    border-radius: 999px;
+    padding: 9px 18px;
+    font-family: 'Karla', sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+    color: var(--ink-soft);
+  }
+  .theme-pill.active { border-color: var(--orange); color: var(--orange); background: #FDF0EA; }
+
+  /* The detail pills carry the age band under the word, so nobody has to guess
+     what "Standard" means - and so the word itself stays the label. */
+  #detailPicker .theme-pill { line-height: 1.25; text-align: center; }
+  #detailPicker .ages { display: block; font-weight: 400; font-size: 12px; opacity: .75; }
+
+  label.field { display: block; margin-bottom: 16px; }
+  label.field span { display: block; font-weight: 700; font-size: 14px; margin-bottom: 6px; font-family: 'Baloo 2', sans-serif; }
+  input[type=text], input[type=email], textarea {
+    width: 100%;
+    padding: 11px 13px;
+    border: 2px solid var(--line);
+    border-radius: 10px;
+    font-family: 'Karla', sans-serif;
+    font-size: 15px;
+    color: var(--ink);
+    background: #fff;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--blue); }
+  textarea { resize: vertical; min-height: 60px; }
+  .error-text { color: var(--danger); font-size: 13px; margin-top: 4px; display: none; }
+
+  .submit-btn {
+    width: 100%;
+    background: var(--orange);
+    color: #fff;
+    border: none;
+    border-radius: 12px;
+    padding: 15px;
+    font-family: 'Baloo 2', sans-serif;
+    font-weight: 700;
+    font-size: 17px;
+    cursor: pointer;
+    margin-top: 6px;
+  }
+  .submit-btn:active { transform: scale(0.99); }
+  .submit-btn:disabled { background: #D8CFC0; cursor: not-allowed; }
+
+  .confirm {
+    display: none;
+    background: #EDF6EE;
+    border: 2px solid var(--green);
+    border-radius: 14px;
+    padding: 20px;
+    text-align: center;
+  }
+  .confirm h3 { color: var(--green); font-size: 19px; }
+  .confirm p { color: var(--ink-soft); font-size: 14px; margin: 6px 0 0; }
+  /* The permission to leave. Set apart from the page counter above it, because
+     the people it is for are the ones who have stopped reading. */
+  .confirm .leave-note {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    color: var(--ink);
+    line-height: 1.5;
+  }
+  /* Wrap a long address onto its own line rather than splitting it mid-word:
+     the point of printing it is that they recognise it at a glance, and
+     "jonatha / n@example.com" is not recognisable. Very long addresses will
+     still split, but only when they cannot fit a line on their own. */
+  .confirm .leave-note strong { overflow-wrap: break-word; }
+
+  .note {
+    font-size: 13px;
+    color: var(--ink-soft);
+    background: #FBF3DD;
+    border: 1px solid var(--yellow);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-top: 16px;
+  }
+
+  .site-footer {
+    text-align: center;
+    margin-top: 34px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-soft);
+    font-size: 13px;
+  }
+  .site-footer a { color: var(--ink-soft); margin: 0 8px; }
+  /* The social row sits above the legal links because it is the one a
+     customer acts on - every ad says "tag us" and until now there was
+     nothing on the site to tag. */
+  .site-social { margin-bottom: 10px; }
+  .site-social a { font-weight: 600; }
+  .site-footer a:hover { color: var(--orange); }
+  .site-footer .entity { display: block; margin-top: 8px; }
+
+  .story-page {
+    position: relative;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    background: #fff;
+    aspect-ratio: 1;
+  }
+  .story-page img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .story-page .num {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    background: var(--orange);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-family: 'Baloo 2', sans-serif;
+  }
+  .story-page.pending { display: flex; align-items: center; justify-content: center; color: var(--ink-soft); font-size: 12px; background: #F3F1E9; }
+  .career-pill { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
+  .career-pill select {
+    border:0; background:transparent; font:inherit; color:inherit;
+    font-weight:700; cursor:pointer; padding:0 2px; outline:none;
+    max-width:150px;
+  }
+  .career-pill select:focus-visible { outline:2px solid var(--blue); outline-offset:2px; border-radius:4px; }
+  .career-pill.active select { color:#fff; }
+  .career-pill.active select option { color:var(--ink); }
+
+  .samples { padding-bottom: 20px; }
+  .sample-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 16px;
+  }
+  .sample { margin: 0; }
+  .sample-pair {
+    display: grid;
+    grid-template-columns: 1fr 18px 1fr;
+    align-items: center;
+    gap: 6px;
+  }
+  .sample-pair img {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+    object-fit: cover;
+    display: block;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: #fff;
+  }
+  .sample-arrow {
+    text-align: center;
+    color: var(--orange);
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .sample figcaption {
+    margin-top: 7px;
+    text-align: center;
+    font-family: 'Baloo 2', sans-serif;
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--ink-soft);
+  }
+  .sample-note {
+    margin-top: 16px;
+    font-size: 12px;
+    color: var(--ink-soft);
+    text-align: center;
+    line-height: 1.5;
+  }
+  /* Loose coloring pages drift in the cream either side of the card. The
+     column is only 760px wide and the card fills it, so the stage has to reach
+     out to the window edges to have anywhere to put them. */
+  .scatter-stage {
+    position: relative;
+    margin-inline: calc(50% - 50vw);
+    padding-inline: calc(50vw - 50%);
+    padding-block: 34px;
+  }
+  .scatter-stage .page { margin-bottom: 0; }
+
+  /* ---- who's in the book ---- */
+  /* One person, one block: who the book is for, their name, then their photo.
+     Keeping the photo beside the name is the whole point - a separate upload
+     step meant matching a face to a name from memory, one screen later. */
+  .person-card {
+    border: 2px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px 14px;
+    margin-bottom: 14px;
+    background: #fff;
+  }
+  .person-card.is-star { border-color: var(--orange); }
+  .person-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+  }
+  .person-row input[type="text"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 2px solid var(--line);
+    border-radius: 8px;
+    font: inherit;
+    background: #fff;
+  }
+  .person-row .ages { display: flex; gap: 6px; }
+  .person-row .ages button {
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    border: 2px solid var(--line);
+    background: #fff;
+    cursor: pointer;
+  }
+  .person-row .ages button.on { border-color: var(--blue); background: #EAF1FB; font-weight: 700; }
+  .person-row .remove {
+    border: 0; background: none; cursor: pointer;
+    font-size: 20px; line-height: 1; color: var(--ink-soft); padding: 6px 8px;
+  }
+  .person-row .remove:hover { color: var(--danger); }
+  /* Sits above the name box, so the question is answered before it is asked. */
+  .star-row {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13.5px; color: var(--ink-soft);
+    margin-bottom: 10px; cursor: pointer;
+  }
+  .star-row input { accent-color: var(--orange); }
+  .person-card.is-star .star-row { color: var(--orange); font-weight: 700; }
+  .add-person {
+    margin-top: 12px;
+    font: inherit; font-weight: 700; font-size: 14px;
+    background: #fff; border: 2px dashed var(--line); border-radius: 10px;
+    padding: 10px 16px; cursor: pointer; color: var(--blue-dark);
+  }
+  .add-person:disabled { opacity: .45; cursor: default; }
+  .people-hint { font-size: 13px; color: var(--ink-soft); margin: 10px 0 0; }
+
+  /* ---- a photo slot per person ---- */
+  .photo-slots { display: grid; gap: 12px; }
+  .person-card .photo-slot { margin-top: 12px; }
+  .photo-slot {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    gap: 12px;
+    align-items: center;
+    border: 2px dashed var(--line);
+    border-radius: 12px;
+    padding: 12px;
+    cursor: pointer;
+    background: #fff;
+  }
+  .photo-slot.filled { border-style: solid; border-color: var(--blue); }
+  .photo-slot .thumb {
+    width: 64px; height: 64px; border-radius: 8px; object-fit: cover;
+    background: var(--paper); border: 1px solid var(--line);
+  }
+  .photo-slot .who { font-weight: 700; font-family: 'Baloo 2', sans-serif; }
+  .photo-slot .who.unnamed { color: var(--ink-soft); font-weight: 600; }
+  .photo-slot .state { font-size: 13px; color: var(--ink-soft); }
+  .photo-slot input[type="file"] { display: none; }
+
+  @media (max-width: 560px) {
+    .sample-grid { grid-template-columns: 1fr; gap: 14px; }
+    /* Named areas rather than source order: without them the remove button is
+       pushed below the age pills and sits on a line of its own, reading as a
+       stray mark rather than something belonging to this person. */
+    .person-row {
+      grid-template-columns: 1fr auto;
+      grid-template-areas: "name remove" "ages ages";
+    }
+    .person-row input[type="text"] { grid-area: name; }
+    .person-row .ages { grid-area: ages; }
+    .person-row .remove { grid-area: remove; }
+  }
+  /* Below this there is no room beside the card, and pages stacked above and
+     below it would just crowd the phone layout. */
+  @media (max-width: 900px) {
+    .scatter-stage { margin-inline: 0; padding-inline: 0; padding-block: 0; }
+    .scatter-stage .ss-scatter { display: none; }
+    .scatter-stage .page { margin-bottom: 28px; }
+  }
+</style>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  "name": "Crayonauts",
+  "url": "https://crayonauts.com/",
+  "logo": "https://crayonauts.com/icon-512_1.png",
+  "description": "Personalized coloring books made from your photo.",
+  "sameAs": [
+    "https://www.instagram.com/crayonauts/",
+    "https://www.tiktok.com/@crayonauts",
+    "https://www.pinterest.com/crayonauts/",
+    "https://www.facebook.com/crayonauts",
+    "https://linktr.ee/crayonauts"
+  ]
+}
+</script>
+
+<!-- The prices here are the ones the backend charges (PRICE_CENTS and
+     FAMILY_PRICE_CENTS in server.js: $15 and $25 as of this writing). They are
+     the ONLY hard-coded prices left on this site - everything the customer
+     sees comes from GET /options - so if a price ever changes, change it here
+     too. A search result quoting a price we no longer charge is worse than a
+     search result quoting none. -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Product",
+  "name": "Personalized coloring book",
+  "description": "A 15-page coloring book drawn from your photo, starring whoever is in it. Personal books star whoever you send; the family version puts up to five people in the same book.",
+  "image": "https://crayonauts.com/og-image_1.png",
+  "brand": { "@type": "Brand", "name": "Crayonauts" },
+  "offers": [
+    {
+      "@type": "Offer",
+      "name": "Personal coloring book",
+      "price": "15.00",
+      "priceCurrency": "USD",
+      "availability": "https://schema.org/InStock",
+      "url": "https://crayonauts.com/"
+    },
+    {
+      "@type": "Offer",
+      "name": "Family coloring book (up to five people)",
+      "price": "25.00",
+      "priceCurrency": "USD",
+      "availability": "https://schema.org/InStock",
+      "url": "https://crayonauts.com/"
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <span class="wordmark">
+        <span class="letters uncolored">Crayonauts</span>
+        <span class="letters colored" aria-hidden="true">Crayonauts</span>
+        <svg class="pencil" viewBox="0 0 30 88" aria-hidden="true" focusable="false">
+          <path d="M9 4h12a4 4 0 0 1 4 4v46H5V8a4 4 0 0 1 4-4z" fill="var(--brand-ink)"/>
+          <rect x="5" y="50" width="20" height="6" fill="#FDF8F0"/>
+          <path d="M5 56h20l-7.8 24a2.2 2.2 0 0 1-4.4 0z" fill="#FDF8F0"
+                stroke="var(--brand-ink)" stroke-width="3" stroke-linejoin="round"/>
+          <path d="M12.4 73h5.2L15 81z" fill="var(--brand-coral)"/>
+        </svg>
+      </span>
+    </div>
+    <div class="tagline">Turn your kid's photo into a coloring book starring them</div>
+    <p class="gift">The perfect gift for a birthday, a holiday, or a rainy Saturday.</p>
+    <p class="pricing">
+      15 pages. <b>$15</b> for personal, <b>$25</b> for family - up to five people in one book.
+      <span class="free">See two pages free before you pay. No subscription, no account, no ads.</span>
+    </p>
+  </header>
+
+  <div class="scatter-stage" data-sample-scatter>
+  <div class="page samples" data-sample-block>
+    <h2>What you get</h2>
+    <p class="step-desc">A photo goes in. A page starring them comes out.</p>
+    <div class="sample-grid">
+      <figure class="sample">
+        <div class="sample-pair">
+          <img src="samples/examples/jasmin-photo.jpg" width="700" height="700" loading="lazy" alt="Photo of a smiling girl in a yellow shirt">
+          <span class="sample-arrow" aria-hidden="true">&rarr;</span>
+          <img src="samples/examples/jasmin-page.jpg" width="700" height="700" loading="lazy" alt="The same girl drawn as a caped superhero on a rooftop">
+        </div>
+        <figcaption>Superhero</figcaption>
+      </figure>
+      <figure class="sample">
+        <div class="sample-pair">
+          <img src="samples/examples/mei-photo.jpg" width="700" height="700" loading="lazy" alt="Photo of a smiling girl in a pink shirt">
+          <span class="sample-arrow" aria-hidden="true">&rarr;</span>
+          <img src="samples/examples/mei-page.jpg" width="700" height="700" loading="lazy" alt="The same girl drawn at a door in a magic tree">
+        </div>
+        <figcaption>Fairy tale</figcaption>
+      </figure>
+      <figure class="sample">
+        <div class="sample-pair">
+          <img src="samples/examples/owen-photo.jpg" width="700" height="700" loading="lazy" alt="Photo of a smiling boy in a blue shirt">
+          <span class="sample-arrow" aria-hidden="true">&rarr;</span>
+          <img src="samples/examples/owen-page.jpg" width="700" height="700" loading="lazy" alt="The same boy drawn as a coloring-page portrait">
+        </div>
+        <figcaption>Simple portrait</figcaption>
+      </figure>
+      <figure class="sample">
+        <div class="sample-pair">
+          <img src="samples/examples/malik-photo.jpg" width="700" height="700" loading="lazy" alt="Photo of a boy in a green hoodie looking to the side">
+          <span class="sample-arrow" aria-hidden="true">&rarr;</span>
+          <img src="samples/examples/malik-page.jpg" width="700" height="700" loading="lazy" alt="The same boy drawn as a coloring-page portrait from the side">
+        </div>
+        <figcaption>Simple portrait, side view</figcaption>
+      </figure>
+    </div>
+    <p class="sample-note">
+      The photos above are AI-generated stand-ins, not real customers &mdash; we do not publish
+      our customers' photos. The coloring pages are real output from this site.
+    </p>
+  </div>
+  </div>
+
+  <div class="page">
+    <div class="step-label">Step 1</div>
+    <h2>Who's in the book?</h2>
+    <p class="step-desc" id="whoStepDesc">Tell us who first, then we'll ask for a photo of each of them.</p>
+
+    <div class="themes" id="bookModePicker">
+      <button type="button" class="theme-pill active" data-mode="one">Personal</button>
+      <button type="button" class="theme-pill" data-mode="family">The whole family</button>
+    </div>
+
+    <div id="onePersonPanel">
+      <div style="margin-top:20px;">
+        <span style="display:block; font-weight:700; font-size:14px; margin-bottom:6px; font-family:'Baloo 2', sans-serif;">Who's the star of this book?</span>
+        <div class="themes" id="audiencePicker">
+          <button type="button" class="theme-pill active" data-audience="kid">A kid</button>
+          <button type="button" class="theme-pill" data-audience="adult">A parent or grandparent (gift)</button>
+        </div>
+      </div>
+
+      <div style="margin-top:20px;">
+        <span style="display:block; font-weight:700; font-size:14px; margin-bottom:6px; font-family:'Baloo 2', sans-serif;" id="countLabel">How many kids are in this photo?</span>
+        <div class="themes" id="childCountPicker">
+          <button type="button" class="theme-pill active" data-count="1">Just 1</button>
+          <button type="button" class="theme-pill" data-count="2">2</button>
+          <button type="button" class="theme-pill" data-count="3">3</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="familyPanel" style="display:none; margin-top:20px;">
+      <span style="display:block; font-weight:700; font-size:14px; margin-bottom:4px; font-family:'Baloo 2', sans-serif;">Everyone who should be in the book</span>
+      <p class="step-desc" style="margin-top:0;">Each person gets their own photo, so the drawings actually look like them. Team logos, cartoon characters and printed designs on clothes are drawn as plain fabric.</p>
+      <div id="peopleRows"></div>
+      <button type="button" class="add-person" id="addPersonBtn">+ Add another person</button>
+      <p class="people-hint" id="peopleHint"></p>
+      <div class="error-text" id="peopleError"></div>
+    </div>
+  </div>
+
+  <!-- Single-person books only. A family book asks for each photo beside the
+       name it belongs to, in step 1, so this whole card is hidden for one. -->
+  <div class="page" id="uploadStep">
+    <div class="step-label">Step 2</div>
+    <h2>Upload a photo</h2>
+    <p class="step-desc">Front-facing photos with good lighting work best. Team logos, cartoon characters and printed designs on clothes are drawn as plain fabric.</p>
+
+    <div id="singleUpload">
+    <div class="dropzone" id="dropzone">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#2F5FA8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+      <p>Drop a photo here, or tap to choose one</p>
+      <span>JPG or PNG</span>
+    </div>
+    <input type="file" id="fileInput" accept="image/*">
+    <div class="error-text" id="fileError">Choose a photo to continue.</div>
+
+    <div class="previews" id="previews" style="display:none;">
+      <div class="preview-box">
+        <img id="origPreview" alt="Original photo">
+        <p>Original</p>
+      </div>
+    </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="step-label" id="styleStepLabel">Step 3</div>
+    <h2>Pick a style</h2>
+    <p class="step-desc" id="themeStepDesc">This decides how the page is drawn.</p>
+    <div class="themes" id="themes">
+      <button type="button" class="theme-pill active" data-theme="Portrait" data-audience="both">Simple portrait</button>
+      <button type="button" class="theme-pill" data-theme="Adventure scene" data-audience="kid">Adventure scene</button>
+      <button type="button" class="theme-pill" data-theme="Superhero" data-audience="kid">Superhero</button>
+      <button type="button" class="theme-pill" data-theme="Fairy tale" data-audience="kid">Fairy tale</button>
+      <span class="theme-pill career-pill" id="careerPill" data-audience="kid">
+        <span class="career-label">When I grow up</span>
+        <select id="careerSelect" aria-label="Pick a career">
+          <option value="Firefighter">Firefighter</option>
+          <option value="Police Officer">Police officer</option>
+          <option value="Doctor">Doctor</option>
+        </select>
+      </span>
+      <button type="button" class="theme-pill" data-theme="Grandparent Garden" data-audience="adult" style="display:none;">Garden day</button>
+      <button type="button" class="theme-pill" data-theme="Family Keepsake" data-audience="adult" style="display:none;">Family keepsake</button>
+    </div>
+
+    <label class="field" style="margin-top:18px;">
+      <span id="childNameLabel">Child's name</span>
+      <input type="text" id="childName" placeholder="Ava">
+      <div class="error-text" id="childNameError">Enter the child's name.</div>
+    </label>
+    <!-- Not "how old is the child in the photo". The drawing always looks like
+         whoever is in the photo; this only decides how much is in the picture,
+         so it is worded around the person holding the crayon. Shown in both
+         flows - a family book hides the name field above but still needs
+         this. -->
+    <div style="margin-bottom:16px;">
+      <span style="display:block; font-weight:700; font-size:14px; margin-bottom:4px; font-family:'Baloo 2', sans-serif;">Who's coloring it?</span>
+      <p class="step-desc" style="margin-top:0; margin-bottom:8px;">This only changes how busy the pages are. The drawings still look like the people in your photos.</p>
+      <div class="themes" id="detailPicker">
+        <button type="button" class="theme-pill" data-detail="simple">Simple<span class="ages">ages 3-4</span></button>
+        <button type="button" class="theme-pill active" data-detail="standard">Standard<span class="ages">ages 5-7</span></button>
+        <button type="button" class="theme-pill" data-detail="detailed">Detailed<span class="ages">ages 8+</span></button>
+      </div>
+    </div>
+    <label class="field">
+      <span>Anything to include in the story? (optional)</span>
+      <textarea id="notes" placeholder="Favorite animal, a pet's name, favorite color..."></textarea>
+    </label>
+
+    <div style="display:flex; gap:10px; margin-top:18px;">
+      <button type="button" class="submit-btn" id="previewBtn" style="margin-top:0;">See my free preview</button>
+      <button type="button" class="submit-btn" id="stopBtn" style="margin-top:0; display:none; background:#fff; color:var(--danger); border:2px solid var(--danger);">Stop</button>
+    </div>
+    <div class="error-text" id="generateError">Upload a photo first.</div>
+    <div id="generateStatus" style="display:none; text-align:center; padding:20px; color:var(--ink-soft); font-size:14px;"></div>
+  </div>
+
+  <div class="page">
+    <div class="step-label" id="bookStepLabel">Step 4</div>
+    <h2>Your book</h2>
+    <p class="step-desc">Your free preview pages appear here. Like what you see? Unlock the rest.</p>
+
+    <div id="storyGrid" style="display:none; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-top: 18px;"></div>
+
+    <div id="paywall" style="display:none; margin-top:20px; border:2px solid #2F5FA8; border-radius:14px; padding:18px; text-align:center;">
+      <h3 style="margin:0 0 6px; font-family:'Baloo 2', sans-serif;">Unlock the full book</h3>
+      <p style="margin:0 0 4px; color:var(--ink-soft); font-size:14px;">
+        You have seen <span id="previewCountText">2</span> pages free. Unlock all <span id="totalCountText">15</span>
+        and download the whole book as a print-ready PDF.
+      </p>
+      <p style="margin:0 0 14px; font-size:28px; font-weight:800; font-family:'Baloo 2', sans-serif;" id="priceText">$15</p>
+      <label class="field" style="text-align:left;">
+        <span>Your email</span>
+        <input type="email" id="parentEmail" placeholder="name@email.com">
+        <div class="error-text" id="emailError">Enter a valid email.</div>
+      </label>
+      <p style="margin:0 0 10px; font-size:12px; color:var(--ink-soft);">We'll send your download link here.</p>
+      <button type="button" class="submit-btn" id="unlockBtn" style="margin-top:0;">Unlock all pages</button>
+      <div class="error-text" id="payError">Could not start checkout.</div>
+      <p style="margin:12px 0 0; font-size:12px; color:var(--ink-soft);">Secure checkout by Stripe. Card details never touch our server.</p>
+    </div>
+
+    <div class="confirm" id="confirm">
+      <h3 id="confirmTitle">Order started</h3>
+      <p id="confirmText"></p>
+      <p id="leaveNote" class="leave-note" style="display:none;"></p>
+      <button type="button" class="submit-btn" id="downloadBtn" style="margin-top:14px; display:none;">Download the book (PDF)</button>
+      <div class="error-text" id="downloadError"></div>
+    </div>
+
+  </div>
+
+  <footer class="site-footer">
+    <div class="site-social">
+      <a href="https://www.instagram.com/crayonauts/" rel="me noopener" target="_blank">Instagram</a>
+      <a href="https://www.tiktok.com/@crayonauts" rel="me noopener" target="_blank">TikTok</a>
+      <a href="https://www.pinterest.com/crayonauts/" rel="me noopener" target="_blank">Pinterest</a>
+      <a href="https://www.facebook.com/crayonauts" rel="me noopener" target="_blank">Facebook</a>
+      <a href="https://linktr.ee/crayonauts" rel="me noopener" target="_blank">All our links</a>
+    </div>
+    <a href="creators.html">Creators</a>
+    <a href="legal.html#privacy">Privacy</a>
+    <a href="legal.html#terms">Terms</a>
+    <a href="legal.html#refunds">Refunds</a>
+    <a href="mailto:support@crayonauts.com">Contact</a>
+    <span class="entity">Crayonauts is a service of Justice United Inc</span>
+  </footer>
+
+</div>
+
+<script>
+const BACKEND_URL = 'https://api.crayonauts.com';
+
+// --- Creator links ---------------------------------------------------------
+// A creator posts crayonauts.com/?c=THEIRCODE. The code is remembered here and
+// sent with the checkout, so their audience never has to type anything and the
+// sale is attributed to them automatically.
+//
+// It is kept in localStorage because the visit and the purchase are rarely the
+// same moment - somebody clicks the link, uploads a photo, looks at the free
+// pages, and buys twenty minutes later, possibly after a reload. Losing the
+// code anywhere in there means the creator is not paid for a sale they made.
+//
+// Last link wins: if somebody arrives through a second creator later, that is
+// who sent them this time.
+const REF_KEY = 'crayonauts_ref';
+
+function rememberCreatorCode() {
+  try {
+    const url = new URLSearchParams(location.search);
+    const raw = (url.get('c') || url.get('code') || '').trim().toUpperCase();
+    // Same shape the server will accept. Anything else is a mangled link, and
+    // storing it would only overwrite a good code with a broken one.
+    if (raw && raw.length <= 64 && /^[A-Z0-9_-]+$/.test(raw)) {
+      localStorage.setItem(REF_KEY, raw);
+    }
+  } catch (e) {
+    // Private browsing refuses storage. The sale still happens; the creator
+    // only keeps the credit if the visitor buys in this same page view.
+  }
+}
+
+function creatorCode() {
+  try {
+    const url = new URLSearchParams(location.search);
+    const raw = (url.get('c') || url.get('code') || '').trim().toUpperCase();
+    if (raw && /^[A-Z0-9_-]+$/.test(raw)) return raw;
+    return localStorage.getItem(REF_KEY) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+rememberCreatorCode();
+
+// --- Funnel counters -------------------------------------------------------
+// How many people land, how many upload, how many pay. Deliberately anonymous:
+// the visitor id below is a random number living in this variable and nowhere
+// else. Nothing is written to the browser, so there is nothing to consent to
+// and nothing that follows anyone between visits.
+const visitorId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+// Where this person came from, so a link partner can be judged on sales rather
+// than on clicks. A ?utm_source= tag wins; otherwise the referring site.
+const trafficSource = (function () {
+  try {
+    const tagged = new URLSearchParams(location.search).get('utm_source');
+    if (tagged) return tagged;
+    if (!document.referrer) return 'direct';
+    const host = new URL(document.referrer).hostname.replace(/^www\./, '');
+    return host === location.hostname ? 'direct' : host;
+  } catch (err) {
+    return 'direct';
+  }
+})();
+const trafficCampaign = (function () {
+  try { return new URLSearchParams(location.search).get('utm_campaign') || ''; }
+  catch (err) { return ''; }
+})();
+
+// Fire and forget. A counter must never slow down or break a sale, so nothing
+// waits on this and every failure is swallowed on purpose.
+// Never let a blocked or slow pixel touch the funnel: no fbq, no error, no
+// difference to the page.
+function fbTrack(name, params) {
+  try { if (window.fbq) window.fbq('track', name, params || {}); } catch (err) { /* ignore */ }
+}
+
+// The site's own counters already fire at exactly the moments worth reporting,
+// so the pixel rides along with them rather than being wired in separately.
+const PIXEL_EVENTS = {
+  preview_started: 'ViewContent',
+  unlock_clicked:  'InitiateCheckout'
+};
+
+function track(type) {
+  if (PIXEL_EVENTS[type]) fbTrack(PIXEL_EVENTS[type]);
+  try {
+    fetch(BACKEND_URL + '/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      body: JSON.stringify({
+        type: type, visitor: visitorId, source: trafficSource, campaign: trafficCampaign
+      })
+    }).catch(function () {});
+  } catch (err) { /* counters are never worth an error */ }
+}
+track('landed');
+
+let selectedFile = null;      // downscaled JPEG blob sent to the backend
+let photoDataUrl = null;      // same image as a data URL, so it survives the Stripe redirect
+
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const previews = document.getElementById('previews');
+const origPreview = document.getElementById('origPreview');
+const fileError = document.getElementById('fileError');
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('drag');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files.length) handleFile(e.target.files[0]);
+});
+
+// Shrink the photo before anything else. Phone photos are 3-8MB, which makes
+// uploads slow and blows the storage budget we need to survive the redirect to
+// Stripe. 1024px is plenty for line art.
+function downscale(file, maxDim = 1024) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        const scale = Math.min(1, maxDim / Math.max(width, height));
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        canvas.toBlob(blob => resolve({ blob, dataUrl }), 'image/jpeg', 0.85);
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleFile(file) {
+  if (!file.type.startsWith('image/')) return;
+  fileError.style.display = 'none';
+  track('uploaded');
+  try {
+    const { blob, dataUrl } = await downscale(file);
+    selectedFile = new File([blob], 'photo.jpg', { type: 'image/jpeg' });
+    photoDataUrl = dataUrl;
+    previews.style.display = 'flex';
+    origPreview.src = dataUrl;
+  } catch (e) {
+    fileError.textContent = "That image could not be read. Try a different photo.";
+    fileError.style.display = 'block';
+  }
+  resetBook();
+}
+
+function resetBook() {
+  storyPages = [];
+  cancelRequested = true;
+  liveRequests.forEach((c) => { try { c.abort(); } catch (e) {} });
+  liveRequests.clear();
+  storyGrid.style.display = 'none';
+  storyGrid.innerHTML = '';
+  document.getElementById('paywall').style.display = 'none';
+  document.getElementById('confirm').style.display = 'none';
+  document.getElementById('stopBtn').style.display = 'none';
+}
+
+let selectedTheme = 'Portrait';
+const careerPill = document.getElementById('careerPill');
+const careerSelect = document.getElementById('careerSelect');
+
+function activatePill(el) {
+  document.querySelectorAll('#themes .theme-pill').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+}
+
+document.querySelectorAll('#themes .theme-pill').forEach(btn => {
+  if (btn === careerPill) return;   // the career pill has its own handler
+  btn.addEventListener('click', () => {
+    activatePill(btn);
+    selectedTheme = btn.dataset.theme;
+  });
+});
+
+// The career pill IS the dropdown. Clicking anywhere on it opens the list;
+// picking an option both selects the career and makes it the active style.
+careerPill.addEventListener('click', (e) => {
+  activatePill(careerPill);
+  selectedTheme = careerSelect.value;
+  if (e.target !== careerSelect && typeof careerSelect.showPicker === 'function') {
+    try { careerSelect.showPicker(); } catch (err) { careerSelect.focus(); }
+  }
+});
+careerSelect.addEventListener('change', () => {
+  activatePill(careerPill);
+  selectedTheme = careerSelect.value;
+});
+
+// ---------------------------------------------------------------------------
+// Who's in the book
+// ---------------------------------------------------------------------------
+// Asked before any photo is uploaded, so every upload slot can be labelled with
+// a name. A pile of unnamed files is no use to the drawing: the backend matches
+// photos to people by their order, so the names have to exist first.
+let bookMode = 'one';           // 'one' | 'family'
+let maxPeople = 5;              // the backend is the authority; see /options
+let people = [];                // { name, subjectType, star, file, dataUrl }
+
+// The backend publishes its own limits so this page does not keep a second copy
+// that can drift. A failure here is not worth blocking an order over.
+let priceCents = 1500;
+let familyPriceCents = 1500;
+
+// What the paywall says has to be what Stripe charges. Both numbers come from
+// the backend rather than being written into this page twice, because a family
+// book costs more than a single one and a page showing the old price would be
+// quoting a customer something we do not then charge them.
+function showPrice() {
+  const el = document.getElementById('priceText');
+  if (!el) return;
+  const cents = bookMode === 'family' ? familyPriceCents : priceCents;
+  el.textContent = '$' + (cents % 100 === 0 ? cents / 100 : (cents / 100).toFixed(2));
+}
+
+fetch(BACKEND_URL + '/options')
+  .then((r) => (r.ok ? r.json() : null))
+  .then((opts) => {
+    if (!opts) return;
+    if (opts.priceCents) priceCents = opts.priceCents;
+    if (opts.family && opts.family.priceCents) familyPriceCents = opts.family.priceCents;
+    if (opts.family && opts.family.maxPeople) {
+      maxPeople = opts.family.maxPeople;
+      renderPeople();
+    }
+    showPrice();
+  })
+  .catch(() => {});
+
+function newPerson(subjectType) {
+  return { name: '', subjectType: subjectType || 'kid', star: false, file: null, dataUrl: null };
+}
+
+// Exactly one person is the one the story follows. Without this a parent who
+// uploads themselves first gets a book about themselves.
+function ensureOneStar() {
+  if (people.some((p) => p.star)) return;
+  const child = people.find((p) => p.subjectType === 'kid') || people[0];
+  if (child) child.star = true;
+}
+
+function renderPeople() {
+  const rows = document.getElementById('peopleRows');
+  if (!rows) return;
+  ensureOneStar();
+  rows.innerHTML = '';
+
+  people.forEach((person, i) => {
+    const card = document.createElement('div');
+    card.className = 'person-card' + (person.star ? ' is-star' : '');
+
+    // 1. Who the book is for, above the name box. A parent who uploads
+    //    themselves first would otherwise get a book starring themselves.
+    const starRow = document.createElement('label');
+    starRow.className = 'star-row';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'starPerson';
+    radio.checked = person.star === true;
+    const starText = document.createTextNode('The book is for ' + (person.name.trim() || 'this person'));
+    radio.addEventListener('change', () => {
+      people.forEach((p) => { p.star = false; });
+      person.star = true;
+      renderPeople();
+    });
+    starRow.appendChild(radio);
+    starRow.appendChild(starText);
+    card.appendChild(starRow);
+
+    // 2. Their name.
+    const row = document.createElement('div');
+    row.className = 'person-row';
+
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.value = person.name;
+    name.placeholder = i === 0 ? 'Ava' : 'Mum';
+    name.setAttribute('aria-label', 'Name of person ' + (i + 1));
+    row.appendChild(name);
+
+    const ages = document.createElement('div');
+    ages.className = 'ages';
+    [['kid', 'Child'], ['adult', 'Adult']].forEach(([value, label]) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.className = person.subjectType === value ? 'on' : '';
+      b.addEventListener('click', () => {
+        person.subjectType = value;
+        renderPeople();
+      });
+      ages.appendChild(b);
+    });
+    row.appendChild(ages);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'remove';
+    remove.innerHTML = '&times;';
+    remove.setAttribute('aria-label', 'Remove this person');
+    remove.addEventListener('click', () => {
+      people.splice(i, 1);
+      if (!people.some((p) => p.star)) ensureOneStar();
+      renderPeople();
+    });
+    row.appendChild(remove);
+
+    card.appendChild(row);
+
+    // 3. Their photo, directly under their name.
+    const slot = photoSlot(person, i);
+    card.appendChild(slot.el);
+
+    // Only the labels that show the name are touched. Re-rendering the whole
+    // list on every keystroke would take the focus out of this box.
+    name.addEventListener('input', () => {
+      person.name = name.value;
+      starText.nodeValue = 'The book is for ' + (person.name.trim() || 'this person');
+      slot.refresh();
+    });
+
+    rows.appendChild(card);
+  });
+
+  const addBtn = document.getElementById('addPersonBtn');
+  if (addBtn) addBtn.disabled = people.length >= maxPeople;
+  const hint = document.getElementById('peopleHint');
+  if (hint) {
+    hint.textContent = people.length >= maxPeople
+      ? 'That is the most we can draw well in one book - ' + maxPeople + ' people.'
+      : 'Up to ' + maxPeople + ' people. One photo each.';
+  }
+}
+
+// The upload box for one person, labelled with their name, returned with a way
+// to relabel it as they type. A slot is here from the start rather than waiting
+// for a name: an empty step with nothing to click reads as broken.
+function photoSlot(person, i) {
+  const label = document.createElement('label');
+  label.className = 'photo-slot';
+
+  const thumb = document.createElement('img');
+  thumb.className = 'thumb';
+  thumb.alt = '';
+  label.appendChild(thumb);
+
+  const text = document.createElement('div');
+  const who = document.createElement('div');
+  who.className = 'who';
+  const state = document.createElement('div');
+  state.className = 'state';
+  text.appendChild(who);
+  text.appendChild(state);
+  label.appendChild(text);
+
+  function refresh() {
+    const name = person.name.trim();
+    label.className = 'photo-slot' + (person.dataUrl ? ' filled' : '');
+    who.className = 'who' + (name ? '' : ' unnamed');
+    who.textContent = name ? 'Photo of ' + name : 'Their photo';
+    if (person.dataUrl) thumb.src = person.dataUrl; else thumb.removeAttribute('src');
+    // A photo with no name attached is the one case that would otherwise be
+    // dropped quietly, so the slot says what is still missing.
+    state.textContent = person.dataUrl
+      ? (name ? 'Photo added - tap to change' : 'Photo added - now type their name above')
+      : (name ? 'Tap to add a photo of ' + name : 'Tap to add their photo');
+  }
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    state.textContent = 'Reading the photo...';
+    try {
+      const { blob, dataUrl } = await downscale(file);
+      person.file = new File([blob], 'person-' + (i + 1) + '.jpg', { type: 'image/jpeg' });
+      person.dataUrl = dataUrl;
+    } catch (err) {
+      state.textContent = 'That photo could not be read. Try another.';
+      return;
+    }
+    refresh();
+  });
+  label.appendChild(input);
+
+  refresh();
+  return { el: label, refresh: refresh };
+}
+
+// Everyone who is ready to be drawn: named, with a photo, in order.
+function familyCast() {
+  return people.filter((p) => p.name.trim() && p.file);
+}
+
+function applyBookMode() {
+  const family = bookMode === 'family';
+  document.getElementById('onePersonPanel').style.display = family ? 'none' : '';
+  document.getElementById('familyPanel').style.display = family ? '' : 'none';
+  document.getElementById('whoStepDesc').textContent = family
+    ? "Add everyone who's in the book, with a photo of each."
+    : "Tell us who first, then we'll ask for a photo of each of them.";
+  // A family book collects its photos beside the names in this step, so the
+  // upload step has nothing left to ask and the ones after it move up.
+  document.getElementById('uploadStep').style.display = family ? 'none' : '';
+  document.getElementById('styleStepLabel').textContent = family ? 'Step 2' : 'Step 3';
+  document.getElementById('bookStepLabel').textContent = family ? 'Step 3' : 'Step 4';
+  // In a family book the story follows one person, and that name is the one the
+  // book is for - so the name field downstream is filled in from it.
+  const nameField = document.getElementById('childName').closest('.field');
+  if (nameField) nameField.style.display = family ? 'none' : '';
+  renderPeople();
+  showPrice();
+}
+
+document.querySelectorAll('#bookModePicker .theme-pill').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#bookModePicker .theme-pill').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    bookMode = btn.dataset.mode;
+    if (bookMode === 'family' && people.length === 0) {
+      // Start with the shape most families have: a child the book is for, and
+      // a grown-up. Both still have to be named.
+      people = [newPerson('kid'), newPerson('adult')];
+    }
+    applyBookMode();
+  });
+});
+
+document.getElementById('addPersonBtn').addEventListener('click', () => {
+  if (people.length >= maxPeople) return;
+  people.push(newPerson('adult'));
+  renderPeople();
+});
+
+// How busy the pages are. Never empty: a book sent without one is a book drawn
+// at whatever busyness the model felt like that minute, which is the thing this
+// picker exists to stop.
+let detailLevel = 'standard';
+document.querySelectorAll('#detailPicker .theme-pill').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#detailPicker .theme-pill').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    detailLevel = btn.dataset.detail;
+  });
+});
+function showDetailLevel(level) {
+  const pill = document.querySelector('#detailPicker .theme-pill[data-detail="' + level + '"]');
+  if (!pill) return;
+  document.querySelectorAll('#detailPicker .theme-pill').forEach((b) => b.classList.remove('active'));
+  pill.classList.add('active');
+  detailLevel = level;
+}
+
+let audience = 'kid';
+let childCount = 1;
+document.querySelectorAll('#audiencePicker .theme-pill').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#audiencePicker .theme-pill').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    audience = btn.dataset.audience;
+
+    const countLabel = document.getElementById('countLabel');
+    const themeStepDesc = document.getElementById('themeStepDesc');
+    if (audience === 'adult') {
+      countLabel.textContent = 'How many people are in this photo?';
+      themeStepDesc.textContent = 'This decides how their page is drawn.';
+      document.getElementById('childNameLabel').textContent = 'Their name';
+      document.getElementById('childName').placeholder = 'Grandma Rose';
+    } else {
+      countLabel.textContent = 'How many kids are in this photo?';
+      themeStepDesc.textContent = "This decides how your kid's page is drawn.";
+      document.getElementById('childNameLabel').textContent = childCount > 1 ? "Children's names" : "Child's name";
+      document.getElementById('childName').placeholder = childCount > 1 ? 'Ava and Milo' : 'Ava';
+    }
+
+    document.querySelectorAll('#themes .theme-pill').forEach(pill => {
+      const matches = pill.dataset.audience === 'both' || pill.dataset.audience === audience;
+      pill.style.display = matches ? (pill.classList.contains('career-pill') ? 'inline-flex' : 'inline-block') : 'none';
+    });
+    const activeThemePill = document.querySelector('#themes .theme-pill.active');
+    if (!activeThemePill || activeThemePill.style.display === 'none') {
+      document.querySelectorAll('#themes .theme-pill').forEach(b => b.classList.remove('active'));
+      const portraitPill = document.querySelector('#themes .theme-pill[data-theme="Portrait"]');
+      portraitPill.classList.add('active');
+      selectedTheme = 'Portrait';
+    }
+  });
+});
+
+const childNameLabel = document.getElementById('childNameLabel');
+const childNameInput = document.getElementById('childName');
+document.querySelectorAll('#childCountPicker .theme-pill').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#childCountPicker .theme-pill').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    childCount = parseInt(btn.dataset.count, 10);
+    if (audience === 'kid') {
+      childNameLabel.textContent = childCount > 1 ? "Children's names" : "Child's name";
+      childNameInput.placeholder = childCount > 1 ? 'Ava and Milo' : 'Ava';
+    }
+  });
+});
+
+const previewBtn = document.getElementById('previewBtn');
+const stopBtn = document.getElementById('stopBtn');
+const generateError = document.getElementById('generateError');
+const generateStatus = document.getElementById('generateStatus');
+const storyGrid = document.getElementById('storyGrid');
+const paywall = document.getElementById('paywall');
+
+let storyPages = [];
+let cancelRequested = false;
+// One per page in flight. The preview pages draw at the same time now, so a
+// single controller could only ever cancel whichever page started last and the
+// Stop button would leave the other one running.
+let liveRequests = new Set();
+let sceneCount = 15;
+let freePreviewPages = 2;
+
+// --- order identity -------------------------------------------------------
+// The backend hands us an access token once, when the order is created. It is
+// what proves this browser owns the order, so it has to survive the round trip
+// to Stripe and back.
+const STATE_KEY = 'crayonauts_order_v1';
+let orderId = null;
+let accessToken = null;
+
+function saveState() {
+  try {
+    localStorage.setItem(STATE_KEY, JSON.stringify({
+      orderId, accessToken, photoDataUrl, selectedTheme, childCount, audience, detailLevel,
+      notes: document.getElementById('notes').value.trim(),
+      childName: document.getElementById('childName').value.trim(),
+      email: document.getElementById('parentEmail').value.trim()
+    }));
+  } catch (e) { /* private mode or full quota - not fatal before payment */ }
+}
+function loadState() {
+  try { return JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (e) { return null; }
+}
+
+function isValidEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
+
+function dataUrlToFile(dataUrl) {
+  const parts = dataUrl.split(',');
+  const mime = (parts[0].match(/:(.*?);/) || [])[1] || 'image/jpeg';
+  const bin = atob(parts[1]);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new File([arr], 'photo.jpg', { type: mime });
+}
+
+async function fetchSceneCount(theme) {
+  try {
+    const r = await fetch(BACKEND_URL + '/story-length?theme=' + encodeURIComponent(theme));
+    const d = await r.json();
+    if (d && d.sceneCount) return d.sceneCount;
+  } catch (e) {}
+  return 15;
+}
+
+function paintGrid(total) {
+  storyGrid.style.display = 'grid';
+  storyGrid.innerHTML = '';
+  for (let i = 0; i < total; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'story-page pending';
+    cell.innerHTML = '<span class="num">' + (i + 1) + '</span>' + (i < freePreviewPages ? '...' : 'locked');
+    storyGrid.appendChild(cell);
+  }
+}
+
+// Generates scenes [from, to). Passes the order credentials so the backend can
+// tell a paid request from a free preview.
+// Holds the last thing the server said when a page failed, so the message the
+// visitor sees can be the real reason ("you have used up the free previews")
+// rather than a generic shrug.
+let lastConvertError = '';
+
+// One page, start to finish. Pulled out of the loop it used to live in so the
+// preview pages can be drawn at the same time instead of one after the other.
+//
+// A page takes the image model about fifty seconds and there was nothing to be
+// done about that, but there was never a reason to spend it twice. Drawing them
+// one at a time meant a visitor stared at an empty grid for a minute and a half
+// before the book was worth looking at, and the feedback off the ads was the
+// obvious one: that is too long to ask anyone to wait. Two at once costs the
+// same money, uses the same free-preview allowance, and finishes in the time
+// the first page used to take on its own.
+async function drawOnePage(i, file, opts) {
+  if (cancelRequested) return 'stopped';
+  if (storyPages[i]) return null;
+
+  const cell = storyGrid.children[i];
+
+  // Phones drop connections. A page that takes most of a minute can die on a
+  // patchy signal, or when the screen sleeps, and one dropped request used to
+  // cost the whole page. Try again a couple of times before giving up. The
+  // server stores each page it draws, so a retry does not pay to redraw it.
+  let stopped = false;
+  let pageErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (cancelRequested) { stopped = true; break; }
+    if (attempt > 1 && cell) {
+      cell.innerHTML = '<span class="num">' + (i + 1) + '</span>retrying...';
+    }
+    const control = new AbortController();
+    liveRequests.add(control);
+    try {
+      const form = new FormData();
+      // A family sends a photo per person plus the names, in the same order -
+      // that pairing is the only thing telling the drawing who is who.
+      if (opts.people && opts.people.length) {
+        opts.people.forEach((person) => form.append('photos', person.file));
+        form.append('people', JSON.stringify(opts.people.map((person) => ({
+          name: person.name.trim(), subjectType: person.subjectType, star: person.star === true
+        }))));
+      } else {
+        form.append('photo', file);
+      }
+      form.append('theme', opts.theme);
+      form.append('sceneIndex', i);
+      form.append('childCount', opts.childCount);
+      form.append('subjectType', opts.audience);
+      form.append('detailLevel', opts.detailLevel || 'standard');
+      form.append('notes', opts.notes || '');
+      if (orderId) form.append('orderId', orderId);
+      if (accessToken) form.append('token', accessToken);
+
+      const response = await fetch(BACKEND_URL + '/convert', { method: 'POST', body: form, signal: control.signal });
+      const data = await response.json();
+      if (!response.ok) {
+        // Out of free previews, not paid, bad token: trying again changes
+        // nothing and would only make the visitor wait.
+        const settled = (response.status === 402 || response.status === 403 || response.status === 429);
+        // Those three are our own sentences, written for a customer, so they
+        // get shown. Anything else is a drawing failure, and the message that
+        // came back is the image model's - which is how a mother trying to
+        // draw her daughter was once told "Invalid image file or mode for
+        // image 1 ... contact us at help.openai.com and include the request
+        // ID". She had done nothing wrong and there was nothing for her to
+        // do with that. The detail is still logged on the server; what
+        // reaches the page is a sentence written for her.
+        const e = new Error(settled
+          ? ((data && data.error) || 'Conversion failed.')
+          : 'Hiccup on our end - that page didn\'t draw. Please try again.');
+        e.settled = settled;
+        throw e;
+      }
+
+      storyPages[i] = data.image;
+      if (cell) {
+        cell.classList.remove('pending');
+        cell.innerHTML = '<span class="num">' + (i + 1) + '</span><img src="' + data.image + '" alt="Page ' + (i + 1) + '">';
+      }
+      pageErr = null;
+      break;
+    } catch (err) {
+      if (err.name === 'AbortError') { stopped = true; break; }
+      pageErr = err;
+      if (err.settled || attempt === 3) break;
+      await new Promise(res => setTimeout(res, 1500 * attempt));
+    } finally {
+      // Dropped as soon as it is done, so Stop only ever aborts requests that
+      // are actually in the air.
+      liveRequests.delete(control);
+    }
+  }
+
+  if (stopped) {
+    if (cell) cell.innerHTML = '<span class="num">' + (i + 1) + '</span>stopped';
+    return 'stopped';
+  }
+  if (pageErr) {
+    lastConvertError = pageErr.message || '';
+    if (cell) cell.innerHTML = '<span class="num">' + (i + 1) + '</span>failed';
+    return 'failed';
+  }
+  return null;
+}
+
+// Generates scenes [from, to). Passes the order credentials so the backend can
+// tell a paid request from a free preview. All of them at once: this only ever
+// draws the free preview - the rest of the book is drawn on the server after
+// payment - so the range is two pages, not fifteen, and the backend holds its
+// own rate limit either way.
+async function generateRange(from, to, file, opts) {
+  lastConvertError = '';
+  cancelRequested = false;
+  stopBtn.style.display = 'inline-block';
+  stopBtn.disabled = false;
+  stopBtn.textContent = 'Stop';
+
+  generateStatus.style.display = 'block';
+  generateStatus.textContent = (to - from) > 1
+    ? 'Drawing your first ' + (to - from) + ' pages - this takes about a minute...'
+    : 'Drawing page ' + (from + 1) + ' - this takes about a minute...';
+
+  const wanted = [];
+  for (let i = from; i < to; i++) wanted.push(i);
+  const results = await Promise.all(wanted.map((i) => drawOnePage(i, file, opts)));
+
+  generateStatus.style.display = 'none';
+  stopBtn.style.display = 'none';
+  liveRequests.clear();
+  return results.filter((r) => r === 'failed').length;
+}
+
+stopBtn.addEventListener('click', () => {
+  cancelRequested = true;
+  liveRequests.forEach((c) => { try { c.abort(); } catch (e) {} });
+  liveRequests.clear();
+  stopBtn.disabled = true;
+  stopBtn.textContent = 'Stopping...';
+});
+
+// Step 2 button: create the order, then draw the free preview pages.
+previewBtn.addEventListener('click', async () => {
+  generateError.style.display = 'none';
+  document.getElementById('childNameError').style.display = 'none';
+
+  const peopleError = document.getElementById('peopleError');
+  peopleError.style.display = 'none';
+
+  let ok = true;
+  const cast = bookMode === 'family' ? familyCast() : [];
+
+  if (bookMode === 'family') {
+    // Refused here rather than at the backend, so nobody waits on a request
+    // that cannot work. Two people is what makes it a family book.
+    const named = people.filter((p) => p.name.trim());
+    // A photo sitting in a slot with no name is dropped from the cast, so say
+    // so rather than telling someone who has added two photos to add people.
+    const photoNoName = people.filter((p) => p.file && !p.name.trim());
+    if (photoNoName.length) {
+      peopleError.textContent = photoNoName.length === 1
+        ? 'One photo has no name yet. Type the name above it so we know who it is.'
+        : photoNoName.length + ' photos have no name yet. Type the names above them so we know who they are.';
+      peopleError.style.display = 'block';
+      ok = false;
+    } else if (named.length < 2) {
+      peopleError.textContent = 'Add at least two people - a child and a grown-up.';
+      peopleError.style.display = 'block';
+      ok = false;
+    } else if (cast.length !== named.length) {
+      const missing = named.filter((p) => !p.file).map((p) => p.name.trim());
+      peopleError.textContent = 'Still need a photo of ' + missing.join(' and ') + '.';
+      peopleError.style.display = 'block';
+      ok = false;
+    }
+  } else if (!selectedFile) {
+    generateError.textContent = 'Upload a photo first.';
+    generateError.style.display = 'block';
+    ok = false;
+  }
+
+  // In a family book the name is whoever the story follows, taken from step 1.
+  const starPerson = cast.find((p) => p.star) || cast[0];
+  const childName = bookMode === 'family'
+    ? (starPerson ? starPerson.name.trim() : '')
+    : document.getElementById('childName').value.trim();
+  if (!childName && bookMode !== 'family') {
+    document.getElementById('childNameError').style.display = 'block'; ok = false;
+  }
+  // Email is collected later, at unlock - not required to see the free preview.
+  if (!ok) return;
+
+  track('preview_started');
+  previewBtn.disabled = true;
+  storyPages = [];
+  paywall.style.display = 'none';
+  document.getElementById('confirm').style.display = 'none';
+
+  try {
+    sceneCount = await fetchSceneCount(selectedTheme);
+    paintGrid(sceneCount);
+
+    const res = await fetch(BACKEND_URL + '/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        childName: childName, childCount: childCount,
+        theme: selectedTheme,
+        notes: document.getElementById('notes').value.trim(),
+        thumb: null,
+        pageCount: sceneCount,
+        // The server keeps the photo so it can draw the book after payment
+        // without this browser needing to stay open. A family book keeps one
+        // per person instead, in the order the pages introduce them.
+        photo: bookMode === 'family' ? null : photoDataUrl,
+        people: bookMode === 'family' ? cast.map((person) => ({
+          name: person.name.trim(),
+          subjectType: person.subjectType,
+          star: person.star === true,
+          photo: person.dataUrl
+        })) : [],
+        subjectType: audience,
+        detailLevel: detailLevel,
+        // Carried on the order so the sale can be credited to its source even
+        // though payment is confirmed minutes later, by Stripe, not by us.
+        visitor: visitorId,
+        source: trafficSource,
+        campaign: trafficCampaign
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.accessToken) throw new Error('Could not start your order.');
+    orderId = data.order.id;
+    accessToken = data.accessToken;
+    saveState();
+
+    await generateRange(0, freePreviewPages, selectedFile, {
+      theme: selectedTheme, childCount: childCount, audience: audience,
+      detailLevel: detailLevel,
+      people: cast,
+      notes: document.getElementById('notes').value.trim()
+    });
+
+    if (storyPages.filter(Boolean).length === 0) {
+      generateError.textContent = lastConvertError
+        || 'Hiccup on our end - the preview pages didn\'t draw. Please try again.';
+      generateError.style.display = 'block';
+    } else {
+      track('preview_shown');
+      document.getElementById('previewCountText').textContent = freePreviewPages;
+      document.getElementById('totalCountText').textContent = sceneCount;
+      paywall.style.display = 'block';
+      paywall.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  } catch (err) {
+    generateError.textContent = err.message || 'Something went wrong. Try again.';
+    generateError.style.display = 'block';
+  }
+  previewBtn.disabled = false;
+});
+
+// Paywall button: hand off to Stripe.
+document.getElementById('unlockBtn').addEventListener('click', async () => {
+  const payError = document.getElementById('payError');
+  const emailError = document.getElementById('emailError');
+  payError.style.display = 'none';
+  emailError.style.display = 'none';
+  const email = document.getElementById('parentEmail').value.trim();
+  if (!isValidEmail(email)) {
+    emailError.style.display = 'block';
+    document.getElementById('parentEmail').focus();
+    return;
+  }
+  const btn = document.getElementById('unlockBtn');
+  track('unlock_clicked');
+  btn.disabled = true;
+  btn.textContent = 'Taking you to checkout...';
+  try {
+    saveState();
+    const r = await fetch(BACKEND_URL + '/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId: orderId, token: accessToken, product: 'digital', code: creatorCode(), email: email })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.url) throw new Error(d.detail || d.error || 'Checkout could not be started.');
+    window.location.href = d.url;
+  } catch (err) {
+    payError.textContent = err.message;
+    payError.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Unlock all pages';
+  }
+});
+
+// Coming back from Stripe, or opening the emailed link. Either way the book is
+// drawn on the SERVER, so all this does is watch progress and show the result.
+// Closing this page no longer costs the customer their book.
+async function watchOrder(id, token) {
+  orderId = id;
+  accessToken = token;
+  const confirmBox = document.getElementById('confirm');
+  const confirmText = document.getElementById('confirmText');
+  const titleEl = document.getElementById('confirmTitle');
+  const leaveNote = document.getElementById('leaveNote');
+  confirmBox.style.display = 'block';
+  titleEl.textContent = 'Payment received';
+  confirmText.textContent = 'Checking your order...';
+  leaveNote.style.display = 'none';
+
+  // Fifteen pages take about eight minutes for a single book and twelve for a
+  // family one. Nobody should have to sit through that, but people will if
+  // nothing tells them otherwise - and they will not believe a page that says
+  // "we'll email you" without naming the address it is emailing. So this reads
+  // their own address back to them.
+  //
+  // The estimates are rounded well up. Both were measured on the live site:
+  // a single page takes about 31 seconds, a family page about 46. Early is
+  // forgiven, late is not.
+  function showLeaveNote(acc) {
+    // The server is the better source - an emailed link opened on a phone has
+    // no form filled in - but fall back to what they typed if it is missing.
+    const email = (acc && acc.email) || document.getElementById('parentEmail').value.trim();
+    const minutes = (acc && acc.peopleCount >= 2) ? 20 : 10;
+    const to = email
+      ? 'we\'ll email it to <strong>' + escapeHtml(email) + '</strong>'
+      : 'we\'ll email it to you';
+    leaveNote.innerHTML = 'You can close this page. We\'re drawing your book now and '
+      + to + ' when it\'s ready \u2014 about ' + minutes + ' minutes.';
+    leaveNote.style.display = 'block';
+  }
+
+  function escapeHtml(text) {
+    return String(text).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  let shown = new Set();
+  let gridPainted = false;
+  const deadline = Date.now() + 20 * 60 * 1000;   // give a long book room to finish
+
+  while (Date.now() < deadline) {
+    let acc;
+    try {
+      const r = await fetch(BACKEND_URL + '/orders/' + id + '/access?token=' + encodeURIComponent(token));
+      if (r.status === 403) {
+        titleEl.textContent = 'Could not open that link';
+        confirmText.textContent = 'That link is not valid any more.';
+        return;
+      }
+      acc = await r.json();
+    } catch (e) {
+      await new Promise(res => setTimeout(res, 4000));
+      continue;
+    }
+
+    if (!acc.paid) {
+      leaveNote.style.display = 'none';
+      confirmText.textContent = "Your payment is still being confirmed. This page will update on its own - you won't be charged twice.";
+      await new Promise(res => setTimeout(res, 4000));
+      continue;
+    }
+
+    selectedTheme = acc.theme || selectedTheme;
+    if (acc.childName) document.getElementById('childName').value = acc.childName;
+    const total = acc.pageCount || sceneCount || 15;
+    sceneCount = total;
+
+    if (!gridPainted) { paintGrid(total); gridPainted = true; }
+
+    // pull whatever pages exist so far
+    try {
+      const pr = await fetch(BACKEND_URL + '/orders/' + id + '/pages?token=' + encodeURIComponent(token));
+      const pd = await pr.json();
+      (pd.pages || []).forEach(p => {
+        if (shown.has(p.sceneIndex)) return;
+        shown.add(p.sceneIndex);
+        storyPages[p.sceneIndex] = p.image;
+        const cell = storyGrid.children[p.sceneIndex];
+        if (cell) {
+          cell.classList.remove('pending');
+          cell.innerHTML = '<span class="num">' + (p.sceneIndex + 1) + '</span><img src="' + p.image + '" alt="Page ' + (p.sceneIndex + 1) + '">';
+        }
+      });
+    } catch (e) {}
+
+    const ready = shown.size;
+    const status = acc.generationStatus || 'idle';
+
+    if (status === 'done' || (status === 'partial' && ready > 0) || ready >= total) {
+      leaveNote.style.display = 'none';
+      titleEl.textContent = 'Your book is ready';
+      confirmText.textContent = ready + ' of ' + total + ' pages are ready to download.';
+      document.getElementById('downloadBtn').style.display = 'inline-block';
+      saveState();
+      return;
+    }
+
+    if (status === 'failed' && ready === 0) {
+      leaveNote.style.display = 'none';
+      titleEl.textContent = 'Something went wrong';
+      confirmText.textContent = "We couldn't draw your book. You have not lost your order - reply to your receipt and we'll sort it out.";
+      return;
+    }
+
+    titleEl.textContent = 'Making your book';
+    confirmText.textContent = ready > 0
+      ? 'Drawing your pages... ' + ready + ' of ' + total + ' done.'
+      : 'Starting on your book now.';
+    showLeaveNote(acc);
+
+    // show partial pages as a download option once there's something worth having
+    if (ready > 0) document.getElementById('downloadBtn').style.display = 'inline-block';
+
+    await new Promise(res => setTimeout(res, 5000));
+  }
+
+  leaveNote.style.display = 'none';
+  confirmText.textContent = "This is taking longer than expected. Your book is still being made - check the link in your email shortly.";
+}
+
+async function resumeAfterPayment(returnedId) {
+  const st = loadState();
+  if (st && String(st.orderId) === String(returnedId) && st.accessToken) {
+    if (st.childName) document.getElementById('childName').value = st.childName;
+    if (st.email) document.getElementById('parentEmail').value = st.email;
+    if (st.notes) document.getElementById('notes').value = st.notes;
+    if (st.detailLevel) showDetailLevel(st.detailLevel);
+    selectedTheme = st.selectedTheme || selectedTheme;
+    return watchOrder(st.orderId, st.accessToken);
+  }
+  const box = document.getElementById('confirm');
+  box.style.display = 'block';
+  document.getElementById('confirmTitle').textContent = 'Check your email';
+  document.getElementById('confirmText').textContent =
+    "Your payment went through and your book is being made. We've emailed you a link to it - open that link to download it when it's ready.";
+}
+
+// The book is built on the server now, and this asks for that same file - the
+// one the email attaches, with the child's drawing on the cover. There is one
+// book; this is a second way to get it, not a second copy of it.
+//
+// The browser used to assemble its own with jsPDF out of the full-colour page
+// images it had already loaded. That came to about 18MB, took a noticeable
+// pause on a phone, and - once the server cover changed - was a different book
+// from the one in the customer's inbox.
+document.getElementById('downloadBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('downloadBtn');
+  const err = document.getElementById('downloadError');
+  if (!orderId || !accessToken) return;
+
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Fetching your book...';
+  err.style.display = 'none';
+
+  try {
+    const res = await fetch(BACKEND_URL + '/orders/' + orderId + '/book.pdf?token='
+      + encodeURIComponent(accessToken));
+    if (!res.ok) throw new Error('We could not put the book together just then. Try again in a moment.');
+    const blob = await res.blob();
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (document.getElementById('childName').value.trim() || 'My')
+      .replace(/[^a-z0-9]/gi, '-') + '-coloring-book.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Not revoked immediately: some browsers have not finished reading the blob
+    // when click() returns, and pulling it away cancels the download.
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (e) {
+    err.textContent = e.message || 'The download did not work. Try again in a moment.';
+    err.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+});
+
+// Opening the link we emailed: ?order=N#t=TOKEN
+// The token sits in the fragment so it never reaches a server log.
+async function openFromLink(id, token) {
+  return watchOrder(id, token);
+}
+
+// On load: did we just come back from Stripe, or open an emailed link?
+(function () {
+  const params = new URLSearchParams(location.search);
+  const hash = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+  const linkToken = hash.get('t');
+
+  if (params.get('order') && linkToken) {
+    // Strip the credential out of the address bar so it isn't left on screen
+    // or copied into a shared URL by accident.
+    history.replaceState(null, '', location.pathname + '?order=' + params.get('order'));
+    openFromLink(params.get('order'), linkToken);
+  } else if (params.get('paid') === '1' && params.get('order')) {
+    // Stripe sends them back with the price of what they bought. Reported once
+    // per order id, because a refresh of this URL is not a second sale.
+    var amt = parseFloat(params.get('amt'));
+    var sold = 'fb_purchase_' + params.get('order');
+    var already = false;
+    try { already = sessionStorage.getItem(sold) === '1'; } catch (err) { /* private mode */ }
+    if (!already) {
+      fbTrack('Purchase', { value: isFinite(amt) ? amt : 0, currency: 'USD' });
+      try { sessionStorage.setItem(sold, '1'); } catch (err) { /* private mode */ }
+    }
+    resumeAfterPayment(params.get('order'));
+  } else if (params.get('canceled') === '1') {
+    const st = loadState();
+    if (st) {
+      document.getElementById('childName').value = st.childName || '';
+      document.getElementById('parentEmail').value = st.email || '';
+      document.getElementById('notes').value = st.notes || '';
+      if (st.detailLevel) showDetailLevel(st.detailLevel);
+    }
+    generateError.textContent = 'Checkout was canceled - nothing was charged. Your preview is still here whenever you want to finish.';
+    generateError.style.display = 'block';
+  }
+})();
+
+</script>
+<script src="embed/sample-scatter.js" defer></script>
+</body>
+</html>

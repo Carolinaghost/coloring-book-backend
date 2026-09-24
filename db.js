@@ -768,6 +768,24 @@ async function updateOrderStatus(id, status) {
   return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
+// Called from /checkout, the first point an order is guaranteed to have a
+// real address - the free preview no longer collects one. The column is
+// NOT NULL, so a saveOrder with no email left it as '', never null; this is
+// what fills it in before the Stripe session is created.
+async function updateOrderEmail(id, email) {
+  if (!usingPostgres) {
+    const order = memoryOrders.find((o) => o.id === Number(id));
+    if (!order) return null;
+    order.email = email;
+    return order;
+  }
+  const { rows } = await pool.query(
+    'UPDATE orders SET email = $1 WHERE id = $2 RETURNING *',
+    [email, Number(id)]
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
 // Removes an order and, via ON DELETE CASCADE, its stored pages.
 // Admin-only at the route layer. There is no undo, so the caller confirms.
 async function deleteOrder(id) {
@@ -1471,6 +1489,7 @@ module.exports = {
   listOrders,
   getOrder,
   updateOrderStatus,
+  updateOrderEmail,
   countOrders,
   recordEvent,
   funnelStats,
