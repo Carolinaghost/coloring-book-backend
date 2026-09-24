@@ -29,6 +29,10 @@ app.set('trust proxy', 1);
 // ---------------------------------------------------------------------------
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+// Stripe signs events about connected accounts (account.updated, when a
+// creator finishes payout setup) through a separate Connect endpoint with its
+// own secret, even though it posts to the same URL as everything else.
+const STRIPE_CONNECT_WEBHOOK_SECRET = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
 const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
 // A family book is the same fifteen pages but several photos and a harder job,
 // so it carries its own price: $25 against $15 for a single subject.
@@ -134,12 +138,31 @@ function verifyStripeSignature(rawBody, header, secret, toleranceSeconds = 300) 
   return JSON.parse(rawBody.toString('utf8'));
 }
 
+// Two endpoints in Stripe, one URL here: the account's own events and the
+// Connect events each come signed with their endpoint's secret. An event is
+// genuine if either secret verifies it. Unset secrets are skipped, so a
+// server with only the original one behaves exactly as it did before.
+function verifyStripeSignatureAny(rawBody, header, secrets) {
+  const configured = secrets.filter(Boolean);
+  if (!configured.length) throw new Error('STRIPE_WEBHOOK_SECRET is not set.');
+  let lastErr;
+  for (const secret of configured) {
+    try {
+      return verifyStripeSignature(rawBody, header, secret);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 // Mounted before express.json() on purpose — signature verification needs the
 // exact bytes Stripe sent, not a re-serialised object.
 app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
   let event;
   try {
-    event = verifyStripeSignature(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
+    event = verifyStripeSignatureAny(req.body, req.headers['stripe-signature'],
+      [STRIPE_WEBHOOK_SECRET, STRIPE_CONNECT_WEBHOOK_SECRET]);
   } catch (err) {
     console.error('Rejected webhook:', err.message);
     return res.status(400).send('Invalid signature.');

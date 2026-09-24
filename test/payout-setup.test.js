@@ -23,6 +23,8 @@ const crypto = require('crypto');
 
 process.env.STRIPE_SECRET_KEY = 'sk_test_not_a_real_key';
 process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_not_a_real_secret';
+// account.updated comes from the Connect endpoint, which signs with its own.
+process.env.STRIPE_CONNECT_WEBHOOK_SECRET = 'whsec_test_connect_not_real';
 process.env.SITE_URL = 'https://crayonauts.com';
 delete process.env.PAYOUT_SETUP_BASE_URL;
 delete process.env.DATABASE_URL;   // exercise the in-memory store
@@ -85,18 +87,19 @@ for (const k of ['log', 'warn', 'error']) {
   console[k] = (...a) => { logged.push(a.map(String).join(' ')); orig(...a); };
 }
 
-function stripeSignature(raw) {
+function stripeSignature(raw, secret) {
   const t = Math.floor(Date.now() / 1000);
-  const v1 = crypto.createHmac('sha256', process.env.STRIPE_WEBHOOK_SECRET)
+  const v1 = crypto.createHmac('sha256', secret)
     .update(t + '.' + raw, 'utf8').digest('hex');
   return `t=${t},v1=${v1}`;
 }
 
-async function webhook(port, event) {
+// Signed as the Connect endpoint signs, unless told otherwise.
+async function webhook(port, event, secret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET) {
   const raw = JSON.stringify(event);
   const resp = await realFetch(`http://127.0.0.1:${port}/stripe/webhook`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'stripe-signature': stripeSignature(raw) },
+    headers: { 'Content-Type': 'application/json', 'stripe-signature': stripeSignature(raw, secret) },
     body: raw
   });
   return resp.status;
@@ -198,6 +201,18 @@ async function main() {
     await new Promise((r) => setTimeout(r, 15));
     check('the same news again is accepted', await webhook(port, updated(true)), 200);
     check('and does not move the date', (await readyAt()).getTime(), first.getTime());
+
+    console.log('\nTwo webhook endpoints, one URL');
+    check('an event signed with the main endpoint\'s secret still verifies',
+      await webhook(port, updated(true), process.env.STRIPE_WEBHOOK_SECRET), 200);
+    const ignored = { id: 'evt_other', type: 'customer.created', data: { object: {} } };
+    check('whichever secret signed it',
+      [await webhook(port, ignored, process.env.STRIPE_WEBHOOK_SECRET), await webhook(port, ignored)], [200, 200]);
+    check('a secret that is neither is refused',
+      await webhook(port, updated(true), 'whsec_somebody_else'), 400);
+    check('and so is no signature at all', (await realFetch(`http://127.0.0.1:${port}/stripe/webhook`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated(true))
+    })).status, 400);
     check('an account we do not know is accepted and ignored',
       await webhook(port, { id: 'evt_x', type: 'account.updated',
         data: { object: { id: 'acct_nobody', payouts_enabled: true } } }), 200);
