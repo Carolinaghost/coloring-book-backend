@@ -162,7 +162,17 @@ const CREATE_EVENTS_INDEX_SQL = `
 // MIGRATIONS because that array runs before the creators table is made.
 const CREATOR_MIGRATIONS = [
   "ALTER TABLE creators ADD COLUMN IF NOT EXISTS free_code TEXT NOT NULL DEFAULT ''",
-  "ALTER TABLE creators ADD COLUMN IF NOT EXISTS free_promo_id TEXT NOT NULL DEFAULT ''"
+  "ALTER TABLE creators ADD COLUMN IF NOT EXISTS free_promo_id TEXT NOT NULL DEFAULT ''",
+  // How a creator gets paid. The Stripe Connect Express account holds their
+  // bank details and tax form - we never see either - and the token is the
+  // only thing standing between a stranger and that creator's onboarding
+  // page, so it is read back by exactly one function and nowhere else.
+  "ALTER TABLE creators ADD COLUMN IF NOT EXISTS stripe_account_id TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE creators ADD COLUMN IF NOT EXISTS payout_link_token TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE creators ADD COLUMN IF NOT EXISTS payout_link_sent_at TIMESTAMPTZ',
+  'ALTER TABLE creators ADD COLUMN IF NOT EXISTS payout_ready_at TIMESTAMPTZ',
+  // Not unique: every creator who has no link yet shares the empty string.
+  'CREATE INDEX IF NOT EXISTS creators_payout_link_token_idx ON creators (payout_link_token)'
 ];
 
 // One row per job per occasion it was supposed to run. The primary key is the
@@ -1365,7 +1375,12 @@ function rowToCreator(row) {
     freeCode: row.free_code || '',
     freePromoId: row.free_promo_id || '',
     signedUpAt: row.signed_up_at,
-    welcomedAt: row.welcomed_at || null
+    welcomedAt: row.welcomed_at || null,
+    // payout_link_token is deliberately not here. This shape is what the admin
+    // /creators page returns, and the token is a credential, not a detail.
+    stripeAccountId: row.stripe_account_id || '',
+    payoutLinkSentAt: row.payout_link_sent_at || null,
+    payoutReadyAt: row.payout_ready_at || null
   };
 }
 
@@ -1405,7 +1420,11 @@ async function saveCreator(c) {
     promo_id: c.promoId || ''
   };
   if (!usingPostgres) {
-    const saved = { id: memoryCreators.length + 1, signed_up_at: new Date(), welcomed_at: null, ...row };
+    const saved = {
+      id: memoryCreators.length + 1, signed_up_at: new Date(), welcomed_at: null,
+      stripe_account_id: '', payout_link_token: '', payout_link_sent_at: null, payout_ready_at: null,
+      ...row
+    };
     memoryCreators.push({ ...saved, email: row.email, code: row.code });
     return rowToCreator(saved);
   }
@@ -1426,6 +1445,60 @@ async function markCreatorWelcomed(id) {
     return;
   }
   await pool.query('UPDATE creators SET welcomed_at = NOW() WHERE id = $1', [Number(id)]);
+}
+
+async function setCreatorStripeAccount(id, stripeAccountId, payoutLinkToken) {
+  if (!usingPostgres) {
+    const c = memoryCreators.find((x) => x.id === Number(id));
+    if (c) { c.stripe_account_id = String(stripeAccountId); c.payout_link_token = String(payoutLinkToken); }
+    return;
+  }
+  await pool.query(
+    'UPDATE creators SET stripe_account_id = $2, payout_link_token = $3 WHERE id = $1',
+    [Number(id), String(stripeAccountId), String(payoutLinkToken)]
+  );
+}
+
+async function markPayoutLinkSent(id) {
+  if (!usingPostgres) {
+    const c = memoryCreators.find((x) => x.id === Number(id));
+    if (c) c.payout_link_sent_at = new Date();
+    return;
+  }
+  await pool.query('UPDATE creators SET payout_link_sent_at = NOW() WHERE id = $1', [Number(id)]);
+}
+
+// Stripe sends account.updated for every change to an account, and retries
+// any it thinks we missed, so this sees the same account many times. COALESCE
+// keeps the first moment it was ready rather than the latest echo of it.
+// True if the account is one of ours.
+async function markPayoutReady(stripeAccountId) {
+  const wanted = String(stripeAccountId || '');
+  if (!wanted) return false;
+  if (!usingPostgres) {
+    const c = memoryCreators.find((x) => x.stripe_account_id === wanted);
+    if (c && !c.payout_ready_at) c.payout_ready_at = new Date();
+    return Boolean(c);
+  }
+  const { rowCount } = await pool.query(
+    'UPDATE creators SET payout_ready_at = COALESCE(payout_ready_at, NOW()) WHERE stripe_account_id = $1',
+    [wanted]
+  );
+  return rowCount > 0;
+}
+
+// The one read that hands back the token, because it is the one that is
+// looked up BY it. The empty string is refused before it reaches the query:
+// every creator without a link has '' in that column, and '' matching one of
+// them at random would open somebody's payout page to anybody.
+async function getCreatorByPayoutToken(token) {
+  const wanted = String(token || '');
+  if (!/^[0-9a-f]{48}$/.test(wanted)) return null;
+  const row = usingPostgres
+    ? (await pool.query('SELECT * FROM creators WHERE payout_link_token = $1', [wanted])).rows[0]
+    : memoryCreators.find((c) => c.payout_link_token === wanted);
+  if (!row) return null;
+  return { ...rowToCreator(row), payoutLinkToken: row.payout_link_token };
 }
 
 async function listCreators() {
@@ -1467,6 +1540,10 @@ module.exports = {
   saveCreator,
   markCreatorWelcomed,
   listCreators,
+  setCreatorStripeAccount,
+  markPayoutLinkSent,
+  markPayoutReady,
+  getCreatorByPayoutToken,
   status,
   initDb,
   saveOrder,

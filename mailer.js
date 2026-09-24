@@ -354,6 +354,57 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent, freeCode }) {
   return { subject, text: textBody, html };
 }
 
+// The separate invite the welcome email promises. The link opens a page
+// Stripe hosts, so a creator's routing number and W-9 go to Stripe and never
+// pass through this server or anybody's inbox. Whoever holds the link can
+// start that page as them, which is why it says not to forward it.
+function creatorPayoutSetupEmail({ name, setupUrl }) {
+  const first = String(name || '').trim().split(/\s+/)[0] || 'there';
+  const subject = 'Set up how you get paid by Crayonauts';
+  const text = [
+    'Hi ' + first + ',',
+    '',
+    'This is the invite to set up how you get paid. It is where your bank',
+    'details and your tax form go.',
+    '',
+    'Set it up here:  ' + setupUrl,
+    '',
+    'The page is hosted by Stripe, who handle our payments. You type your',
+    'details straight into Stripe - they are never emailed, and we never see',
+    'your account number. It takes a few minutes.',
+    '',
+    'This link is yours alone. Please do not forward it: anybody who has it',
+    'can start the setup as you.',
+    '',
+    'It works more than once. Stop partway and open it again later to pick up',
+    'where you left off. Anything about setting up, just reply to this.',
+    'Anything about what you are owed comes from accounts@crayonauts.com.',
+    '',
+    '- Crayonauts'
+  ].join('\n');
+  const html = [
+    '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
+    '<h2 style="color:#2F5FA8;">Set up how you get paid, ' + escapeHtml(first) + '</h2>',
+    '<p>This is the invite to set up how you get paid. It&rsquo;s where your bank details and your '
+    + 'tax form go.</p>',
+    '<p style="margin:22px 0;"><a href="' + escapeHtml(setupUrl) + '" style="background:#2F5FA8;'
+    + 'color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:bold;">'
+    + 'Set up payouts</a></p>',
+    '<p>The page is hosted by Stripe, who handle our payments. You type your details straight into '
+    + 'Stripe &mdash; they&rsquo;re never emailed, and we never see your account number. It takes a '
+    + 'few minutes.</p>',
+    '<div style="background:#FBF6EA;border-left:4px solid #E8622C;border-radius:8px;padding:14px 16px;margin:18px 0;">'
+    + '<p style="margin:0;"><strong>This link is yours alone.</strong> Please don&rsquo;t forward it: '
+    + 'anybody who has it can start the setup as you.</p>'
+    + '</div>',
+    '<p style="font-size:13px;color:#6B6357;">It works more than once. Stop partway and open it again '
+    + 'later to pick up where you left off. Anything about setting up, just reply to this. Anything '
+    + 'about what you&rsquo;re owed comes from accounts@crayonauts.com.</p>',
+    '</div>'
+  ].join('');
+  return { subject, text, html };
+}
+
 // Only ever wraps values that came off a form, so it covers the five that
 // matter and does not pretend to be a sanitiser.
 function escapeHtml(v) {
@@ -362,4 +413,4 @@ function escapeHtml(v) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-module.exports = { sendMail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
+module.exports = { sendMail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, creatorPayoutSetupEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };

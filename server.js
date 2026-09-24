@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const mailer = require('./mailer');
+const creatorPayouts = require('./creator-payouts');
 const mirrorGuard = require('./mirror-guard');
 const { buildBookPdf, pdfFileName } = require('./pdf');
 const watchdog = require('./watchdog');
@@ -28,6 +29,10 @@ app.set('trust proxy', 1);
 // ---------------------------------------------------------------------------
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+// Stripe signs events about connected accounts (account.updated, when a
+// creator finishes payout setup) through a separate Connect endpoint with its
+// own secret, even though it posts to the same URL as everything else.
+const STRIPE_CONNECT_WEBHOOK_SECRET = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
 const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
 // A family book is the same fifteen pages but several photos and a harder job,
 // so it carries its own price: $25 against $15 for a single subject.
@@ -133,12 +138,31 @@ function verifyStripeSignature(rawBody, header, secret, toleranceSeconds = 300) 
   return JSON.parse(rawBody.toString('utf8'));
 }
 
+// Two endpoints in Stripe, one URL here: the account's own events and the
+// Connect events each come signed with their endpoint's secret. An event is
+// genuine if either secret verifies it. Unset secrets are skipped, so a
+// server with only the original one behaves exactly as it did before.
+function verifyStripeSignatureAny(rawBody, header, secrets) {
+  const configured = secrets.filter(Boolean);
+  if (!configured.length) throw new Error('STRIPE_WEBHOOK_SECRET is not set.');
+  let lastErr;
+  for (const secret of configured) {
+    try {
+      return verifyStripeSignature(rawBody, header, secret);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 // Mounted before express.json() on purpose — signature verification needs the
 // exact bytes Stripe sent, not a re-serialised object.
 app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
   let event;
   try {
-    event = verifyStripeSignature(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
+    event = verifyStripeSignatureAny(req.body, req.headers['stripe-signature'],
+      [STRIPE_WEBHOOK_SECRET, STRIPE_CONNECT_WEBHOOK_SECRET]);
   } catch (err) {
     console.error('Rejected webhook:', err.message);
     return res.status(400).send('Invalid signature.');
@@ -183,6 +207,28 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
       if (order) {
         renderBook(order.id).catch((err) =>
           console.error(`Order ${order.id}: background render crashed -`, err.message));
+      }
+    }
+    if (event.type === 'account.updated') {
+      // A creator finished Stripe's onboarding, or Stripe changed its mind
+      // about them. Only the first "yes, payouts work" is recorded - the
+      // Thursday report cares that they CAN be paid, and when that started.
+      // Stripe sends this event a lot and retries freely; markPayoutReady
+      // does nothing the second time.
+      //
+      // Caught here rather than answered with a 500: a failed write only
+      // loses the timestamp until Stripe's next account.updated, and one
+      // creator's account must not put the order webhooks into Stripe's
+      // retry backoff alongside it.
+      const account = event.data.object;
+      if (account && account.payouts_enabled === true) {
+        try {
+          const ours = await db.markPayoutReady(account.id);
+          console.log(ours ? `Connect account ${account.id} can now be paid.`
+            : `Connect account ${account.id} can be paid, but no creator has it.`);
+        } catch (err) {
+          console.error(`Could not mark ${account.id} ready for payouts:`, err.message);
+        }
       }
     }
     res.json({ received: true });
@@ -634,6 +680,21 @@ app.post('/creators', async (req, res) => {
     alreadySignedUp: false
   });
 
+  await sendCreatorWelcome(creator, free);
+  // After the welcome, so the promise of "a separate invite" arrives before
+  // the invite does. Its own failures are logged and left for
+  // scripts/send-payout-setup.js to pick up: the sign-up already succeeded.
+  try {
+    const setup = await creatorPayouts.setUpCreatorPayouts(creator, { siteUrl: SITE_URL, from: CREATOR_MAIL_FROM });
+    console.log('Creator ' + code + ': payout account ready'
+      + (setup.emailed ? ', setup email sent.' : ', no mailer - setup email NOT sent.'));
+  } catch (err) {
+    console.error('Creator ' + code + ' has no payout setup yet:', err.message);
+  }
+});
+
+async function sendCreatorWelcome(creator, free) {
+  const { code, name, email } = creator;
   if (!mailer.configured) {
     console.warn('No mailer configured - creator ' + code + ' got no welcome email.');
     return;
@@ -653,6 +714,35 @@ app.post('/creators', async (req, res) => {
     // Not fatal: the code exists, the page showed it, and welcomed_at staying
     // null is the record that somebody needs to resend it.
     console.error('Creator ' + code + ' has no welcome email:', err.message);
+  }
+}
+
+// The link in the payout setup email. No admin key: the token IS the
+// credential, and it is only ever written into that one email. Each visit asks
+// Stripe for a fresh onboarding link, because theirs expire in minutes and
+// ours has to still work when somebody gets round to it next week.
+//
+// Nothing here logs the token or the URL that carries it, and a bad token gets
+// the same flat answer as a missing one so the page is no use for guessing.
+const PAYOUT_LINK_INVALID = "This link isn't valid. Email accounts@crayonauts.com and we'll send you a new one.";
+app.get('/creators/payout-setup/:token', async (req, res) => {
+  let creator;
+  try {
+    creator = await db.getCreatorByPayoutToken(req.params.token);
+  } catch (err) {
+    console.error('Could not look up a payout setup link:', err.message);
+    return res.status(503).type('text/plain').send('Could not open this just now. Try again in a minute.');
+  }
+  if (!creator || !creator.stripeAccountId) {
+    return res.status(404).type('text/plain').send(PAYOUT_LINK_INVALID);
+  }
+  try {
+    const url = await creatorPayouts.createAccountLink(creator.stripeAccountId, creator.payoutLinkToken, { siteUrl: SITE_URL });
+    res.redirect(302, url);
+  } catch (err) {
+    console.error('Creator ' + creator.code + ': could not open payout setup -', err.message);
+    res.status(502).type('text/plain').send('Could not open this just now. Try again in a minute, '
+      + 'or email accounts@crayonauts.com.');
   }
 });
 

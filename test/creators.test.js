@@ -51,12 +51,18 @@ function check(label, got, want) {
 // coupon each one hung off rather than only that one was made.
 const stripeCreates = [];
 const freeCreates = [];
+const connectCreates = [];
 const stripeCodes = new Set();
 const realFetch = global.fetch;
 
 function stubStripe() {
   global.fetch = async (url, opts) => {
     const href = typeof url === 'string' ? url : url.href || String(url);
+    if (href === 'https://api.stripe.com/v1/accounts') {
+      const form = new URLSearchParams(opts.body.toString());
+      connectCreates.push({ email: form.get('email'), code: form.get('metadata[creator_code]') });
+      return { ok: true, json: async () => ({ id: 'acct_' + connectCreates.length }) };
+    }
     if (href.startsWith('https://api.stripe.com/v1/promotion_codes')) {
       if (!opts || (opts.method || 'GET') === 'GET') {
         // The lookup resolvePromotionCode does. Answer from what we created,
@@ -110,8 +116,13 @@ function stubStripe() {
 }
 
 // The welcome mail, captured rather than sent.
+// The payout setup invite goes out right after it and is counted on its own.
 const sent = [];
-mailer.sendMail = async (m) => { sent.push(m); return true; };
+const invites = [];
+mailer.sendMail = async (m) => {
+  (/get paid/.test(m.subject) ? invites : sent).push(m);
+  return true;
+};
 Object.defineProperty(mailer, 'configured', { get: () => true });
 
 function signUp(port, body) {
@@ -230,6 +241,13 @@ async function main() {
     check('and it names the mailbox that handles what they are owed',
       sent[0].text.includes('accounts@crayonauts.com'), true);
 
+    console.log('\nThe separate invite the welcome promises');
+    check('a Connect account was made for them', connectCreates.length, 1);
+    check('under the address they gave', connectCreates[0].email, 'jerrell@example.com');
+    check('and the invite went, separately', invites.length, 1);
+    check('with a setup link on the site',
+      /https:\/\/crayonauts\.com\/creators\/payout-setup\/[0-9a-f]{48}/.test(invites[0].text), true);
+
     console.log('\nThe same person, twice');
     const again = await signUp(port, {
       name: 'Jerrell Crump', email: 'JERRELL@example.com',
@@ -245,6 +263,7 @@ async function main() {
     check('with no second free book minted', freeCreates.length, 1);
     await settle();
     check('and no second welcome email', sent.length, 1);
+    check('and no second payout account or invite', [connectCreates.length, invites.length], [1, 1]);
 
     console.log('\nTwo different people who share a name');
     const clash = await signUp(port, {
@@ -312,6 +331,11 @@ async function main() {
     check('every creator who got a code is listed', listed.length, 3);
     check('and the list records whether the welcome went',
       listed.every((c) => 'welcomedAt' in c), true);
+    check('and whether they can be paid yet',
+      listed.every((c) => 'payoutLinkSentAt' in c && 'payoutReadyAt' in c), true);
+    // The token opens somebody's payout page. The admin list must never carry it.
+    check('but never the payout link token',
+      listed.some((c) => 'payoutLinkToken' in c || JSON.stringify(c).match(/[0-9a-f]{48}/)), false);
   } finally {
     server.close();
     global.fetch = realFetch;
