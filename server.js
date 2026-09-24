@@ -1968,6 +1968,13 @@ app.get('/options', (req, res) => {
       key, label: DETAIL_LEVELS[key].label, ages: DETAIL_LEVELS[key].ages
     })),
     defaultDetailLevel: DEFAULT_DETAIL,
+    // The four styles drawn automatically after upload. The site builds its
+    // strip from this so the tiles, their labels and the theme each one selects
+    // in step 3 are defined in one place and cannot drift apart.
+    styleGrid: {
+      kid: STYLE_GRID.kid.map((t) => ({ theme: t.theme, label: t.label })),
+      adult: STYLE_GRID.adult.map((t) => ({ theme: t.theme, label: t.label }))
+    },
     freePreviewPages: FREE_PREVIEW_PAGES,
     priceCents: PRICE_CENTS,
     family: {
@@ -2034,27 +2041,28 @@ function previewDay(at = new Date()) {
   }).format(at);
 }
 
-async function takeFreePreview(ip) {
+async function takeFreePreview(ip, count = 1) {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
+  const want = Math.max(1, Number(count) || 1);
 
   if (now - sitePreviewWindow.start > hour) sitePreviewWindow = { start: now, count: 0 };
-  if (sitePreviewWindow.count >= FREE_PREVIEWS_PER_HOUR) return 'site';
+  if (sitePreviewWindow.count + want > FREE_PREVIEWS_PER_HOUR) return 'site';
 
   let quota;
   try {
-    quota = await db.takePreviewQuota(ip, previewDay(), FREE_PREVIEWS_PER_IP);
+    quota = await db.takePreviewQuota(ip, previewDay(), FREE_PREVIEWS_PER_IP, want);
   } catch (err) {
     // The database being unreachable must not stop a visitor seeing their own
     // child drawn. Fail open, loudly: the site-wide hourly cap above is still
     // standing, so the worst case is bounded rather than unlimited.
     console.error('Could not count free previews, letting this one through -', err.message);
-    sitePreviewWindow.count++;
+    sitePreviewWindow.count += want;
     return null;
   }
   if (!quota.allowed) return 'visitor';
 
-  sitePreviewWindow.count++;
+  sitePreviewWindow.count += want;
   return null;
 }
 
@@ -2069,9 +2077,9 @@ async function takeFreePreview(ip) {
 //
 // The site-wide hourly window is deliberately NOT refunded. That one exists to
 // blunt a spike, and a spike of failing requests is still a spike.
-async function giveBackFreePreview(ip) {
+async function giveBackFreePreview(ip, count = 1) {
   try {
-    await db.refundPreviewQuota(ip, previewDay());
+    await db.refundPreviewQuota(ip, previewDay(), Math.max(1, Number(count) || 1));
   } catch (err) {
     // Worth knowing about, not worth turning one failure into two.
     console.error('Could not give back a free preview -', err.message);
@@ -2083,6 +2091,147 @@ setInterval(() => {
   db.purgeOldPreviewQuota().catch((err) =>
     console.error('Could not tidy old preview counters:', err.message));
 }, 24 * 60 * 60 * 1000).unref();
+
+
+// The four styles shown automatically the moment a photo is uploaded, before
+// anybody has typed a name or picked a theme. This is an advert, so each tile
+// names the scene it draws rather than taking scene 0 and hoping.
+//
+// That matters most for Superhero, whose scene 0 is "discovers a glowing cape
+// in their bedroom" - and whose costume only starts at scene 1 (THEME_OUTFITS
+// 'from'). A tile showing scene 0 would sell the superhero style with a picture
+// of a child in a bedroom holding some cloth. Hence an explicit index per tile,
+// and a test that reads the resolved scene back so a reordering of STORY_SCENES
+// cannot quietly undo this.
+//
+// Superhero appears in both grids and is the one theme written for a kid. For a
+// parent or grandparent it draws the rooftop at sunset instead of leaping off
+// one: the same costume and cape, a scene that does not ask a grandmother to
+// jump off a building.
+const STYLE_GRID = {
+  kid: [
+    { theme: 'Portrait', sceneIndex: 0, label: 'Simple portrait' },
+    { theme: 'Adventure scene', sceneIndex: 3, label: 'Adventure scene' },
+    { theme: 'Superhero', sceneIndex: 2, label: 'Superhero' },
+    { theme: 'Police Officer', sceneIndex: 1, label: 'Police officer' }
+  ],
+  adult: [
+    { theme: 'Portrait', sceneIndex: 0, label: 'Simple portrait' },
+    { theme: 'Grandparent Garden', sceneIndex: 0, label: 'Garden day' },
+    { theme: 'Family Keepsake', sceneIndex: 0, label: 'Family keepsake' },
+    { theme: 'Superhero', sceneIndex: 12, label: 'Superhero' }
+  ]
+};
+const STYLE_GRID_SIZE = 4;
+
+function styleGridFor(audience) {
+  return STYLE_GRID[audience === 'adult' ? 'adult' : 'kid'];
+}
+
+
+// The style grid. Four pages of the visitor's own photo, one per style, drawn
+// the moment the photo lands - before a name, a theme or an order exists.
+//
+// It is deliberately NOT part of /convert. /convert draws one scene of one
+// theme and has grown a paywall, an order, a rescue queue and a detail level
+// around that shape; this draws four themes for nobody in particular and has
+// none of those. Sharing the route would mean a second set of branches through
+// all of it.
+app.post('/style-preview', upload.fields([
+  { name: 'photo', maxCount: 1 },
+  { name: 'photos', maxCount: MAX_PEOPLE }
+]), async (req, res) => {
+  let chargedTo = null;
+  let charged = 0;
+  try {
+    const singlePhoto = (req.files && req.files.photo && req.files.photo[0]) || null;
+    const familyPhotos = (req.files && req.files.photos) || [];
+    if (!singlePhoto && !familyPhotos.length) {
+      return res.status(400).json({ error: 'No photo uploaded.' });
+    }
+    if (!CAN_CALL_OPENAI) {
+      return res.status(500).json({ error: 'Server is missing its OpenAI API key.' });
+    }
+
+    let cast = [];
+    if (req.body.people) {
+      try { cast = cleanPeople(JSON.parse(req.body.people)); }
+      catch (err) { return res.status(400).json({ error: 'Could not read the list of people.' }); }
+    }
+    if (familyPhotos.length && cast.length !== familyPhotos.length) {
+      return res.status(400).json({
+        error: `Send one name per photo: ${familyPhotos.length} photo(s) but ${cast.length} name(s).`
+      });
+    }
+
+    const audience = req.body.audience === 'adult' ? 'adult' : 'kid';
+    const tiles = styleGridFor(audience);
+    let childCount = parseInt(req.body.childCount, 10) || 1;
+    childCount = Math.min(Math.max(childCount, 1), 3);
+
+    // All four or none. Three tiles and a failure is worse than a clean stop,
+    // and it is the stop that sends the visitor on to step 3.
+    const visitorIp = clientIp(req);
+    const blocked = await takeFreePreview(visitorIp, tiles.length);
+    if (blocked === 'visitor') {
+      // Not a generic error. The site reads this and moves the customer into
+      // step 3 to name their child and choose a theme, which is where they were
+      // always going - they have simply seen all the free drawing they get.
+      return res.status(429).json({
+        error: 'You have used up today\'s free previews.',
+        quotaExhausted: true,
+        advanceToNextStep: true,
+        freePreviewsPerDay: FREE_PREVIEWS_PER_IP
+      });
+    }
+    if (blocked === 'site') {
+      return res.status(429).json({
+        error: 'We are busier than usual and free previews are paused for a few minutes. Please try again shortly.',
+        quotaExhausted: false
+      });
+    }
+    chargedTo = visitorIp;
+    charged = tiles.length;
+
+    const references = (familyPhotos.length ? familyPhotos : [singlePhoto]).map((file, i) => ({
+      buffer: file.buffer,
+      mimetype: file.mimetype,
+      filename: file.originalname || `photo-${i + 1}.png`
+    }));
+
+    // Four at once. Each tile stands alone, so one refusal by OpenAI costs that
+    // tile and not the grid - the visitor still sees the other three.
+    const drawn = await Promise.all(tiles.map(async (tile) => {
+      const prompt = buildPrompt(tile.theme, tile.sceneIndex, childCount,
+        audience === 'adult' ? 'adult' : 'kid', '', cast, DEFAULT_DETAIL);
+      try {
+        const image = await renderScene({ photos: references, prompt, paid: false });
+        return { theme: tile.theme, label: tile.label, image };
+      } catch (err) {
+        console.error(`Style preview (${tile.theme}) failed -`, err.message);
+        return { theme: tile.theme, label: tile.label, image: null, error: 'Could not draw this style.' };
+      }
+    }));
+
+    // Give back what was taken and not used. A tile that drew nothing cost the
+    // visitor an image and handed them no picture.
+    const missed = drawn.filter((t) => !t.image).length;
+    if (missed) {
+      await giveBackFreePreview(chargedTo, missed);
+      charged -= missed;
+    }
+    chargedTo = null;
+
+    if (missed === tiles.length) {
+      return res.status(502).json({ error: 'The preview could not be drawn. Please try again in a moment.' });
+    }
+    res.json({ audience, styles: drawn });
+  } catch (err) {
+    console.error('Style preview failed:', err);
+    if (chargedTo && charged) await giveBackFreePreview(chargedTo, charged);
+    res.status(500).json({ error: 'Could not draw the preview.' });
+  }
+});
 
 // photo: the single-subject book, unchanged. photos: a family book, one file per
 // person, in the same order as the people field that names them.
@@ -2856,4 +3005,4 @@ if (require.main === module) {
 
 module.exports = { app, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
-  rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
+  rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
