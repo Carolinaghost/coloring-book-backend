@@ -104,6 +104,12 @@ async function main() {
   // the same warning the command line would have printed - not a summary of it.
   check('and so is the note that Sam needs setting up in QuickBooks',
     /FIRST time/.test(sent[0].text) && /sam@example\.com/.test(sent[0].text), true);
+  // The report says who is owed; the money moves only when Jonathan runs the
+  // next step himself. The email has to say what that step is.
+  check('and it points at the command that actually pays them',
+    /node scripts\/pay-creators\.js/.test(sent[0].text) && /--send/.test(sent[0].text), true);
+  check('and says to send it by Wednesday, so it lands by Friday',
+    /Send by Wednesday so it reaches their banks by Friday/.test(sent[0].text), true);
 
   console.log('\nRunning again the same morning');
   // The hourly timer comes round inside the same 8am hour, and Render

@@ -12,7 +12,7 @@ const creatorPayouts = require('./creator-payouts');
 const mirrorGuard = require('./mirror-guard');
 const { buildBookPdf, pdfFileName } = require('./pdf');
 const watchdog = require('./watchdog');
-const { main: affiliateReport } = require('./scripts/affiliate-report.js');
+const { main: affiliateReport, saturdayArgs, DEFAULT_REPORT_RATES } = require('./scripts/affiliate-report.js');
 const neon = require('./neon');
 const textGuard = require('./text-guard');
 
@@ -2707,11 +2707,10 @@ const PAYOUT_REPORT_TZ = process.env.PAYOUT_REPORT_TZ || 'America/New_York';
 const PAYOUT_REPORT_HOUR = parseInt(process.env.PAYOUT_REPORT_HOUR, 10) || 8;
 // Saturday, with Sunday as 0 - the morning after the pay week closes.
 const PAYOUT_REPORT_DOW = 6;
-// Jerrell negotiated 25 and is the only exception. Anyone else is on the
-// CREATOR_RATE_PERCENT default, which the sign-up form also writes into each
-// code's metadata. Kept as an env var so a second exception does not need a
-// deploy.
-const PAYOUT_REPORT_RATES = process.env.PAYOUT_REPORT_RATES || 'JERRELL=25';
+// Who is on what rate lives with the report (saturdayArgs), because
+// scripts/pay-creators.js has to pay by exactly the same numbers. This copy is
+// only for printing the command line in the alerts below.
+const PAYOUT_REPORT_RATES = process.env.PAYOUT_REPORT_RATES || DEFAULT_REPORT_RATES;
 
 // What day and hour it is where the creators were promised their week runs.
 function localNow(at, tz) {
@@ -2728,11 +2727,17 @@ function localNow(at, tz) {
   };
 }
 
+// By Wednesday, because Friday payday means Friday in their bank, and a
+// direct deposit takes about two business days (see scripts/pay-creators.js).
+const PAY_CREATORS_HINT = 'Next step, once these look right: node scripts/pay-creators.js '
+  + 'shows exactly what would be sent, and adding --send pays everyone who is set up. '
+  + 'Send by Wednesday so it reaches their banks by Friday.';
+
 async function runPayoutReport(at = new Date()) {
   const lines = [];
   const warnings = [];
   await affiliateReport({
-    argv: ['--period', '--tz', PAYOUT_REPORT_TZ, '--rates', PAYOUT_REPORT_RATES],
+    argv: saturdayArgs(),
     key: STRIPE_SECRET_KEY,
     now: at,
     print: (...a) => lines.push(a.join(' ')),
@@ -2778,13 +2783,15 @@ async function maybeSendPayoutReport(at = new Date()) {
     return 'failed';
   }
 
-  const body = report.warnings.length
+  // The report only says who is owed. Nothing sends money on a schedule:
+  // once Jonathan has read this, paying it is one command he runs himself.
+  const body = (report.warnings.length
     ? report.warnings.join('\n') + '\n' + report.lines.join('\n')
-    : report.lines.join('\n');
+    : report.lines.join('\n')).trim() + '\n\n' + PAY_CREATORS_HINT;
   await sendAlert({
     level: 'PAYOUT',
     subject: 'Creator payouts - pay these today',
-    lines: [body.trim()]
+    lines: [body]
   });
   console.log('Payout report emailed for ' + here.date);
   return 'sent';

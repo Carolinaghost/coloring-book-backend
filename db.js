@@ -20,6 +20,7 @@ const memoryPreviewQuota = new Map();
 const memorySignupQuota = new Map();
 const memoryJobRuns = new Set();
 const memoryCreators = [];
+const memoryCreatorPayouts = [];
 let memoryEvents = [];
 let nextMemoryId = 1;
 let nextMemoryEventId = 1;
@@ -193,6 +194,33 @@ const CREATE_JOB_RUNS_SQL = `
   );
 `;
 
+// One row per creator per pay week that scripts/pay-creators.js has paid, or
+// started to pay. The unique key is what makes paying twice impossible rather
+// than merely unlikely: a second run for the same week cannot claim the row
+// again, whatever else goes wrong.
+//
+// A row with no stripe_transfer_id is a payment that was claimed and not
+// confirmed - Stripe refused it, or the run died mid-request. The next run
+// asks Stripe before trying again (see scripts/pay-creators.js), so an empty
+// id never means "safe to send blindly". attempts is part of the idempotency
+// key: Stripe remembers a refusal under a key for a day, so a transfer that
+// failed on an empty balance has to be retried under a new one.
+const CREATE_CREATOR_PAYOUTS_SQL = `
+  CREATE TABLE IF NOT EXISTS creator_payouts (
+    id                 SERIAL      PRIMARY KEY,
+    creator_id         INTEGER     NOT NULL REFERENCES creators (id),
+    period_start       TIMESTAMPTZ NOT NULL,
+    period_end         TIMESTAMPTZ NOT NULL,
+    amount_cents       INTEGER     NOT NULL,
+    stripe_transfer_id TEXT        NOT NULL DEFAULT '',
+    attempts           INTEGER     NOT NULL DEFAULT 0,
+    last_error         TEXT        NOT NULL DEFAULT '',
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    paid_at            TIMESTAMPTZ,
+    UNIQUE (creator_id, period_start, period_end)
+  );
+`;
+
 const CREATE_CREATORS_SQL = `
   CREATE TABLE IF NOT EXISTS creators (
     id           SERIAL      PRIMARY KEY,
@@ -305,6 +333,7 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_CREATORS_SQL);
     await pool.query(CREATE_JOB_RUNS_SQL);
     for (const sql of CREATOR_MIGRATIONS) await pool.query(sql);
+    await pool.query(CREATE_CREATOR_PAYOUTS_SQL);
     ready = true;
     lastError = null;
     console.log('Connected to Postgres. Orders table is ready.');
@@ -1501,6 +1530,96 @@ async function getCreatorByPayoutToken(token) {
   return { ...rowToCreator(row), payoutLinkToken: row.payout_link_token };
 }
 
+// Pay weeks are passed around as Unix seconds, the way Stripe and the report
+// speak; the table keeps them as real timestamps.
+function rowToPayout(row) {
+  if (!row) return null;
+  const secs = (v) => Math.floor(new Date(v).getTime() / 1000);
+  return {
+    id: row.id,
+    creatorId: row.creator_id,
+    periodStart: secs(row.period_start),
+    periodEnd: secs(row.period_end),
+    amountCents: row.amount_cents,
+    stripeTransferId: row.stripe_transfer_id || '',
+    attempts: row.attempts,
+    lastError: row.last_error || '',
+    createdAt: row.created_at,
+    paidAt: row.paid_at || null
+  };
+}
+
+async function listCreatorPayouts(periodStart, periodEnd) {
+  if (!usingPostgres) {
+    return memoryCreatorPayouts
+      .filter((p) => p.periodStart === periodStart && p.periodEnd === periodEnd)
+      .map((p) => ({ ...p }));
+  }
+  const { rows } = await pool.query(
+    `SELECT * FROM creator_payouts
+      WHERE period_start = to_timestamp($1) AND period_end = to_timestamp($2)`,
+    [periodStart, periodEnd]
+  );
+  return rows.map(rowToPayout);
+}
+
+// Claims this creator's week before any money moves. Hands back the row to pay
+// against - new, or an earlier unconfirmed one brought up to today's amount -
+// or null when the week is already paid, which is the one answer that must
+// stop the caller. One statement, so two runs at once cannot both get a row.
+async function claimCreatorPayout({ creatorId, periodStart, periodEnd, amountCents }) {
+  if (!usingPostgres) {
+    let p = memoryCreatorPayouts.find((x) => x.creatorId === Number(creatorId)
+      && x.periodStart === periodStart && x.periodEnd === periodEnd);
+    if (p && p.stripeTransferId) return null;
+    if (!p) {
+      p = { id: memoryCreatorPayouts.length + 1, creatorId: Number(creatorId), periodStart, periodEnd,
+        amountCents, stripeTransferId: '', attempts: 0, lastError: '', createdAt: new Date(), paidAt: null };
+      memoryCreatorPayouts.push(p);
+    }
+    p.amountCents = amountCents;
+    return { ...p };
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO creator_payouts (creator_id, period_start, period_end, amount_cents)
+     VALUES ($1, to_timestamp($2), to_timestamp($3), $4)
+     ON CONFLICT (creator_id, period_start, period_end) DO UPDATE
+       SET amount_cents = EXCLUDED.amount_cents
+       WHERE creator_payouts.stripe_transfer_id = ''
+     RETURNING *`,
+    [Number(creatorId), periodStart, periodEnd, amountCents]
+  );
+  return rows[0] ? rowToPayout(rows[0]) : null;
+}
+
+async function recordCreatorTransfer(id, stripeTransferId) {
+  if (!usingPostgres) {
+    const p = memoryCreatorPayouts.find((x) => x.id === Number(id));
+    if (p) { p.stripeTransferId = String(stripeTransferId); p.paidAt = new Date(); p.lastError = ''; }
+    return;
+  }
+  await pool.query(
+    `UPDATE creator_payouts SET stripe_transfer_id = $2, paid_at = NOW(), last_error = ''
+      WHERE id = $1`,
+    [Number(id), String(stripeTransferId)]
+  );
+}
+
+// Stripe answered, and the answer was no. Counted, so the retry goes out under
+// a fresh idempotency key rather than getting the same remembered refusal.
+async function failCreatorPayout(id, message) {
+  const text = String(message || '').slice(0, 500);
+  if (!usingPostgres) {
+    const p = memoryCreatorPayouts.find((x) => x.id === Number(id));
+    if (p) { p.attempts++; p.lastError = text; }
+    return;
+  }
+  await pool.query(
+    'UPDATE creator_payouts SET attempts = attempts + 1, last_error = $2 WHERE id = $1',
+    [Number(id), text]
+  );
+}
+
 async function listCreators() {
   if (!usingPostgres) return memoryCreators.map(rowToCreator);
   const { rows } = await pool.query('SELECT * FROM creators ORDER BY id DESC');
@@ -1544,6 +1663,10 @@ module.exports = {
   markPayoutLinkSent,
   markPayoutReady,
   getCreatorByPayoutToken,
+  listCreatorPayouts,
+  claimCreatorPayout,
+  recordCreatorTransfer,
+  failCreatorPayout,
   status,
   initDb,
   saveOrder,

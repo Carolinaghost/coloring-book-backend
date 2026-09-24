@@ -304,13 +304,25 @@ function windowLabel(startSec, endSec, tz) {
   return `${day(startSec)} 00:00 to ${day(endSec - 1000)} 23:59`;
 }
 
-// `print` and `warn` are how the backend borrows this. The Saturday email runs
-// the very same function the command line does and collects the lines instead
-// of printing them - so what lands in Jonathan's inbox cannot drift from what
-// he sees when he runs it himself, which is the only way two versions of a
-// payout number ever stay in agreement.
-async function main(deps = {}) {
-  const print = deps.print || console.log;
+// What the Saturday run pays by. server.js emails the report with these and
+// scripts/pay-creators.js sends the money with them, so the two cannot be
+// working from different rates or a different week.
+//
+// Jerrell negotiated 25 and is the only exception. Anyone else is on the
+// default rate, which the sign-up form also writes into each code's metadata.
+// PAYOUT_REPORT_RATES is an env var so a second exception needs no deploy.
+const DEFAULT_REPORT_RATES = 'JERRELL=25';
+function saturdayArgs(env = process.env) {
+  return ['--period', '--tz', env.PAYOUT_REPORT_TZ || DEFAULT_TZ,
+    '--rates', env.PAYOUT_REPORT_RATES || DEFAULT_REPORT_RATES];
+}
+
+// Who is owed what. Everything that decides a number lives here and nothing
+// that prints does, because two things use it: the report below, which shows
+// Jonathan the numbers, and scripts/pay-creators.js, which sends them. If the
+// money were worked out twice, the two could disagree and the one that moved
+// real money would be the one nobody had looked at.
+async function computeOwed(deps = {}) {
   const warn = deps.warn || console.warn;
   const key = deps.key || KEY;
   if (!key) throw new Error('STRIPE_SECRET_KEY is not set. Run this where the key lives.');
@@ -421,6 +433,21 @@ async function main(deps = {}) {
     })
     .sort((a, b) => b.owed - a.owed || a.code.localeCompare(b.code));
 
+  const currency = currencies.size ? [...currencies][0] : 'usd';
+  return { args, usePeriod, since, until, days, rate, tz, now, currency,
+    rows, unattributed, unattributedPaid, unknown };
+}
+
+// `print` and `warn` are how the backend borrows this. The Saturday email runs
+// the very same function the command line does and collects the lines instead
+// of printing them - so what lands in Jonathan's inbox cannot drift from what
+// he sees when he runs it himself, which is the only way two versions of a
+// payout number ever stay in agreement.
+async function main(deps = {}) {
+  const print = deps.print || console.log;
+  const { args, usePeriod, since, until, days, rate, tz, now,
+    rows, unattributed, unattributedPaid, unknown } = await computeOwed(deps);
+
   if (args.csv) {
     print('code,coupon,active,sales,customers_paid,rate_percent,owed,'
       + 'first_sale,creator_name,creator_email');
@@ -499,4 +526,4 @@ if (require.main === module) {
   main().catch((err) => { console.error('\nFailed:', err.message); process.exit(1); });
 }
 
-module.exports = { promoIdFromSession, attribute, tally, listAll, csvCell, parseArgs, parseRates, couponNames, payPeriod, windowLabel, main };
+module.exports = { promoIdFromSession, attribute, tally, listAll, csvCell, parseArgs, parseRates, couponNames, payPeriod, windowLabel, computeOwed, saturdayArgs, DEFAULT_REPORT_RATES, money, main };

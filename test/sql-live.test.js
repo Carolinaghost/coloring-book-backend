@@ -55,6 +55,8 @@ async function accepts(label, run) {
     () => db.resumableOrders(5, 2));
   await accepts('the creator list',
     () => db.listCreators());
+  await accepts('the payouts already made for a week',
+    () => db.listCreatorPayouts(1786766400, 1787371200));
   await accepts('a creator looked up by payout setup link',
     () => db.getCreatorByPayoutToken(require('crypto').randomBytes(24).toString('hex')));
   await accepts('the order list',
