@@ -1235,22 +1235,36 @@ async function purgeOldEvents(days) {
 //
 // `day` is passed in rather than taken from now() so the boundary is the
 // customer's midnight, not the database server's.
-async function takePreviewQuota(ip, day, limit) {
+// count is how many IMAGES this one request will draw. The style grid draws
+// four at once, and it has to take all four or none: taking them one at a time
+// lets a visitor with three left start a four-tile grid, watch three tiles
+// arrive and the fourth fail, and be charged for the lot. All-or-nothing is
+// also what makes the arithmetic in the spec true - eight allowance, four a
+// run, two runs.
+async function takePreviewQuota(ip, day, limit, count = 1) {
+  const want = Math.max(1, Number(count) || 1);
   if (!usingPostgres) {
     const key = `${ip}|${day}`;
-    const used = (memoryPreviewQuota.get(key) || 0) + 1;
-    if (used > limit) return { allowed: false, used: limit };
-    memoryPreviewQuota.set(key, used);
-    return { allowed: true, used };
+    const already = memoryPreviewQuota.get(key) || 0;
+    if (already + want > limit) return { allowed: false, used: already, left: Math.max(0, limit - already) };
+    memoryPreviewQuota.set(key, already + want);
+    return { allowed: true, used: already + want, left: limit - (already + want) };
   }
   const { rows } = await pool.query(
-    `INSERT INTO preview_quota (ip, day, used) VALUES ($1, $2, 1)
-       ON CONFLICT (ip, day) DO UPDATE SET used = preview_quota.used + 1
-       WHERE preview_quota.used < $3
+    `INSERT INTO preview_quota (ip, day, used) VALUES ($1, $2, $4)
+       ON CONFLICT (ip, day) DO UPDATE SET used = preview_quota.used + $4
+       WHERE preview_quota.used + $4 <= $3
      RETURNING used`,
-    [ip, day, limit]
+    [ip, day, limit, want]
   );
-  return rows.length ? { allowed: true, used: rows[0].used } : { allowed: false, used: limit };
+  if (rows.length) return { allowed: true, used: rows[0].used, left: limit - rows[0].used };
+  // Refused. Say how many are actually left, because the difference between
+  // "none at all" and "two, but you asked for four" is what the site needs to
+  // decide whether to send the visitor on to step 3.
+  const { rows: seen } = await pool.query(
+    'SELECT used FROM preview_quota WHERE ip = $1 AND day = $2', [ip, day]);
+  const used = seen.length ? seen[0].used : 0;
+  return { allowed: false, used, left: Math.max(0, limit - used) };
 }
 
 // Handing one back. A preview is charged for before OpenAI is asked, because
@@ -1265,18 +1279,22 @@ async function takePreviewQuota(ip, day, limit) {
 // image - there is nothing to harvest by forcing failures - and the site-wide
 // hourly cap is not refunded at all, so what OpenAI can be made to spend in an
 // hour is unchanged.
-async function refundPreviewQuota(ip, day) {
+async function refundPreviewQuota(ip, day, count = 1) {
+  const back = Math.max(1, Number(count) || 1);
   if (!usingPostgres) {
     const key = `${ip}|${day}`;
     const used = memoryPreviewQuota.get(key) || 0;
-    if (used > 0) memoryPreviewQuota.set(key, used - 1);
-    return Math.max(used - 1, 0);
+    const now = Math.max(0, used - back);
+    memoryPreviewQuota.set(key, now);
+    return now;
   }
+  // GREATEST keeps a refund from going below zero even if it is called more
+  // times than the images were taken.
   const { rows } = await pool.query(
-    `UPDATE preview_quota SET used = used - 1
-      WHERE ip = $1 AND day = $2 AND used > 0
+    `UPDATE preview_quota SET used = GREATEST(used - $3, 0)
+      WHERE ip = $1 AND day = $2
      RETURNING used`,
-    [ip, day]
+    [ip, day, back]
   );
   return rows.length ? rows[0].used : 0;
 }
