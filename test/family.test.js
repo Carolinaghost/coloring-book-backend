@@ -126,6 +126,27 @@ async function main() {
   // Three names join with commas, and the verb still agrees.
   check('three names read as a list', family.includes('Mum, Dad and Leo'), true);
 
+  console.log('\nA family added as photos only');
+
+  // The site no longer asks each person's name or whether they are a child or
+  // a grown-up: it sends the photos in order as Person 1, Person 2, ... with
+  // the first one as the star, and 'auto' for their age.
+  const photosOnly = buildPrompt('Superhero', 0, 1, 'kid', '', [
+    { name: 'Person 1', subjectType: 'auto', star: true },
+    { name: 'Person 2', subjectType: 'auto' },
+    { name: 'Person 3', subjectType: 'auto' }
+  ]);
+  check('each is drawn at the age they look in their photo',
+    photosOnly.includes('Person 2 (drawn at the age they look in their photo)'), true);
+  check('nobody is called a child or an adult by guesswork',
+    /Person \d \((a child|an adult)\)/.test(photosOnly), false);
+  check('the first photo is the star', photosOnly.includes("this is Person 1's story"), true);
+  check('the cast is still closed', photosOnly.includes('These 3 are the only people this story is about'), true);
+  check('the scene still names them, not "the family"',
+    photosOnly.includes('Person 1, Person 2 and Person 3 discover'), true);
+  check('an unknown age still reads as a child, as before',
+    buildPrompt('Superhero', 0, 1, 'kid', '', [{ name: 'A', subjectType: 'x' }, { name: 'B' }]).includes('A (a child)'), true);
+
   console.log('\nEvery theme can carry a family');
 
   // A family book works by swapping "the child" out of the scene. A scene that

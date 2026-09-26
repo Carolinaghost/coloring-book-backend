@@ -1447,7 +1447,10 @@ function cleanPeople(raw) {
     .filter((p) => p && typeof p === 'object')
     .map((p) => ({
       name: String(p.name || '').slice(0, 60).trim(),
-      subjectType: p.subjectType === 'adult' ? 'adult' : 'kid',
+      // 'auto' when the site did not ask: a family book is just photos now,
+      // with no "child or grown-up" question, so each person is drawn at the
+      // age they look in their own photo.
+      subjectType: p.subjectType === 'adult' ? 'adult' : (p.subjectType === 'auto' ? 'auto' : 'kid'),
       // The one the story follows. The book is for a child, so a child is who
       // it should be about even when the whole family is in it.
       star: p.star === true,
@@ -1484,7 +1487,8 @@ function nameList(people) {
 function castLine(people) {
   const star = pickStar(people);
   const described = people.map((p) => {
-    const kind = p.subjectType === 'adult' ? 'an adult' : 'a child';
+    const kind = p.subjectType === 'adult' ? 'an adult'
+      : (p.subjectType === 'auto' ? 'drawn at the age they look in their photo' : 'a child');
     return `${p.name} (${kind})`;
   });
   const list = joinNames(described);
