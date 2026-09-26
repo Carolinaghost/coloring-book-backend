@@ -265,6 +265,35 @@ async function main() {
     check('and no second welcome email', sent.length, 1);
     check('and no second payout account or invite', [connectCreates.length, invites.length], [1, 1]);
 
+    console.log('\nLost the email: the resend form');
+    function resend(email) {
+      return fetchJson(`http://127.0.0.1:${port}/creators/resend`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+    }
+    const before = sent.length;
+    const lost = await resend('Jerrell@Example.com');
+    check('is accepted', lost.status, 200);
+    check('and says the mail is on its way', /on file/.test(lost.body.message), true);
+    await settle();
+    check('the welcome email went again', sent.length, before + 1);
+    check('to the address on file', sent[sent.length - 1].to, 'jerrell@example.com');
+    check('carrying the same code', /JERRELLCRUMP/.test(sent[sent.length - 1].text + sent[sent.length - 1].html), true);
+    check('and their own free book code, not a new one', /FREE-[A-Z0-9]{6}/.test(sent[sent.length - 1].text) && sent[sent.length - 1].text.includes(freeCreates[0].code), true);
+    check('with still only one code in Stripe', stripeCreates.length, 1);
+    check('and still only one free book minted', freeCreates.length, 1);
+
+    // Somebody who is not a creator gets the same words and nothing else, so
+    // the form cannot be used to check who is signed up.
+    const stranger = await resend('nobody@example.com');
+    check('an unknown address gets the same answer', [stranger.status, stranger.body.message], [200, lost.body.message]);
+    await settle();
+    check('and no email at all', sent.length, before + 1);
+
+    const junk = await resend('not an email');
+    check('a bad address is refused', junk.status, 400);
+
     console.log('\nTwo different people who share a name');
     const clash = await signUp(port, {
       name: 'Jerrell Crump', email: 'other.jerrell@example.com',
