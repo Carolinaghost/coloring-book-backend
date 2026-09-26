@@ -813,6 +813,25 @@ async function getOrder(id) {
   return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
+// The name and email arrive at checkout now, not when the free preview is
+// drawn, so an order can start without them. Only unpaid orders: a paid
+// order's email is where its book goes, and that is not changed from a
+// browser.
+async function setOrderContact(id, { childName, email }) {
+  if (!usingPostgres) {
+    const order = memoryOrders.find((o) => o.id === Number(id));
+    if (!order || order.paid) return null;
+    order.childName = childName;
+    order.email = email;
+    return order;
+  }
+  const { rows } = await pool.query(
+    'UPDATE orders SET child_name = $1, email = $2 WHERE id = $3 AND paid = FALSE RETURNING *',
+    [childName, email, Number(id)]
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
 async function updateOrderStatus(id, status) {
   if (!usingPostgres) {
     const order = memoryOrders.find((o) => o.id === Number(id));
@@ -1709,6 +1728,7 @@ module.exports = {
   listOrders,
   getOrder,
   updateOrderStatus,
+  setOrderContact,
   countOrders,
   recordEvent,
   funnelStats,
