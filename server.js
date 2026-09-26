@@ -441,6 +441,10 @@ const CREATOR_RATE_PERCENT = parseInt(process.env.CREATOR_RATE_PERCENT, 10) || 2
 // changes that: every sign-up now mints a real 100%-off code, so a sign-up is
 // worth an actual book, and the form has to be rationed like one.
 const CREATOR_SIGNUPS_PER_IP = parseInt(process.env.CREATOR_SIGNUPS_PER_IP, 10) || 1;
+// Lost-code resends a day per visitor. Each one is an email to somebody's
+// inbox, so it is capped, but higher than sign-ups: retyping an address is
+// the common case here.
+const CREATOR_RESENDS_PER_IP = Number(process.env.CREATOR_RESENDS_PER_IP || 3);
 
 // The free book the proposal leads with. Without this a creator's first
 // experience is noticing that the thing they were promised did not arrive.
@@ -691,6 +695,40 @@ app.post('/creators', async (req, res) => {
       + (setup.emailed ? ', setup email sent.' : ', no mailer - setup email NOT sent.'));
   } catch (err) {
     console.error('Creator ' + code + ' has no payout setup yet:', err.message);
+  }
+});
+
+// A creator who lost their code. The same reply goes back whether or not the
+// address is on file, so the form cannot be used to find out who is a
+// creator; the email itself only ever goes to the address already on record.
+app.post('/creators/resend', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase().slice(0, 254);
+  if (!looksLikeEmail(email)) return res.status(400).json({ error: 'That email does not look right.' });
+
+  try {
+    const quota = await db.takeSignupQuota('resend|' + clientIp(req), previewDay(), CREATOR_RESENDS_PER_IP);
+    if (!quota.allowed) {
+      return res.status(429).json({ error: 'That is enough for today. Email admin@crayonauts.com and we will send it by hand.' });
+    }
+  } catch (err) {
+    console.error('Could not count code resends:', err.message);
+    return res.status(503).json({ error: 'Could not send it just now. Try again in a minute.' });
+  }
+
+  // Answer first. Whether the address is on file must not show in the timing
+  // any more than in the words.
+  res.json({ ok: true, message: 'If that email is on file, your code and link are on their way to it.' });
+
+  try {
+    const creator = await db.getCreatorByEmail(email);
+    if (!creator) {
+      console.log('Code resend asked for an address that is not a creator.');
+      return;
+    }
+    await sendCreatorWelcome(creator, creator.freeCode ? { code: creator.freeCode } : null);
+    console.log('Creator ' + creator.code + ' asked for their code again; resent.');
+  } catch (err) {
+    console.error('Could not resend a creator code:', err.message);
   }
 });
 
