@@ -257,14 +257,15 @@ function requireAdmin(req, res) {
 app.post('/orders', async (req, res) => {
   wakeUp();
   const { childName, childCount, email, theme, notes, thumb, pageCount } = req.body || {};
-  if (!childName || !email) {
-    return res.status(400).json({ error: 'Missing childName or email.' });
-  }
+  // The free preview is drawn before anyone is asked for a name or an email -
+  // those come at checkout (see /checkout). The order still starts here, with
+  // the photo, so the pages drawn for the preview are kept and become the
+  // first pages of the book instead of being drawn again after payment.
   try {
     const order = await db.saveOrder({
-      childName: String(childName).slice(0, 200),
+      childName: String(childName || '').trim().slice(0, 200),
       childCount: Math.min(Math.max(parseInt(childCount, 10) || 1, 1), 3),
-      email: String(email).slice(0, 320),
+      email: String(email || '').trim().slice(0, 320),
       theme: theme || 'Portrait',
       notes: String(notes || '').slice(0, 1000),
       thumb: thumb || null,
@@ -874,9 +875,32 @@ app.post('/checkout', async (req, res) => {
   }
 
   try {
-    const order = await db.authorizeOrder(orderId, token);
+    let order = await db.authorizeOrder(orderId, token);
     if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
     if (order.paid) return res.status(409).json({ error: 'This order is already paid.' });
+
+    // Name and email are asked for here, at Unlock, rather than before the
+    // free preview. Whatever the browser sends now wins; an order that was
+    // started with them (older pages of the site) keeps what it has.
+    const body = req.body || {};
+    const sentName = String(body.childName || '').trim().slice(0, 200);
+    const sentEmail = String(body.email || '').trim().slice(0, 320);
+    if (sentEmail && !looksLikeEmail(sentEmail)) {
+      return res.status(400).json({ error: 'That email address does not look right.' });
+    }
+    if (sentName || sentEmail) {
+      const updated = await db.setOrderContact(order.id, {
+        childName: sentName || order.childName || '',
+        email: sentEmail || order.email || ''
+      });
+      if (updated) order = updated;
+    }
+    const isFamilyOrder = Array.isArray(order.people) && order.people.length > 1;
+    // The email is where the book is sent, so no checkout without one. A
+    // family book takes its name from the people in it.
+    if (!order.email || (!order.childName && !isFamilyOrder)) {
+      return res.status(400).json({ error: 'Add a name and an email first.' });
+    }
 
     const isPrint = product === 'print';
     const isFamily = Array.isArray(order.people) && order.people.length > 1;
@@ -2478,7 +2502,10 @@ app.post('/convert', upload.fields([
       // and the sweep will finish it in the background and email the pages, so
       // a bad two minutes at OpenAI does not cost a customer who did nothing
       // wrong. Only previews: a paid order already has its own resume.
-      if (previewOrder && !previewOrder.paid) {
+      // Only with an email to send it to: the preview is drawn before anyone
+      // is asked for one now, and finishing it for nobody is money spent on
+      // pages that are never seen.
+      if (previewOrder && !previewOrder.paid && previewOrder.email) {
         try {
           await db.markPreviewRescue(previewOrder.id);
           console.log(`Order ${previewOrder.id}: preview failed, queued to finish and email.`);
