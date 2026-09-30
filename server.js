@@ -1210,8 +1210,15 @@ app.get('/orders/:id/pages', async (req, res) => {
   try {
     const order = await db.authorizeOrder(req.params.id, req.query.token);
     if (!order) return res.status(403).json({ error: 'Unknown order or bad token.' });
-    if (!order.paid) return res.status(402).json({ error: 'This order has not been paid for.' });
-    res.json({ pages: await db.listPages(order.id) });
+    const pages = await db.listPages(order.id);
+    // Unpaid: only the free preview pages - the ones this customer has already
+    // been shown - so a "come back to your book" link can show them again with
+    // the Unlock button under them. Everything past the preview stays behind
+    // payment exactly as before.
+    if (!order.paid) {
+      return res.json({ pages: pages.filter((p) => p.sceneIndex < FREE_PREVIEW_PAGES), previewOnly: true });
+    }
+    res.json({ pages });
   } catch (err) {
     console.error('Page fetch failed:', err);
     res.status(500).json({ error: 'Could not load the pages.' });
