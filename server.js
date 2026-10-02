@@ -1427,6 +1427,28 @@ const THEME_OUTFITS = {
     from: 0,
     outfit: 'gardening clothes - a wide-brimmed sun hat, a work apron with one big front '
       + 'pocket, sleeves rolled to the elbow, gardening gloves and rubber boots'
+  },
+  // The holidays. Same rule as the rest: plain shapes, nothing printed. The
+  // party hat is a bare cone, the sweater is broad stripes rather than a
+  // reindeer or a snowflake motif (an emblem with something inside it), and
+  // the wizard is a friendly costume, never a scary one.
+  'Birthday': {
+    from: 0,
+    outfit: 'a party outfit - a cone-shaped paper party hat with a small pom-pom on top and '
+      + 'nothing drawn on it, held on by a thin elastic under the chin, a smart plain party '
+      + 'top with a bow at the collar, neat trousers or a twirly skirt, and shiny party shoes'
+  },
+  'Christmas': {
+    from: 0,
+    outfit: 'cozy holiday clothes - a chunky knitted holiday sweater with a plain simple '
+      + 'pattern of a few broad stripes across the chest and sleeves and nothing else on it, '
+      + 'a long knitted scarf, knitted mittens, warm trousers and snow boots'
+  },
+  'Halloween': {
+    from: 0,
+    outfit: 'a friendly wizard costume - a long plain wizard robe with wide sleeves and a '
+      + 'simple tie belt, a tall pointed wizard hat with a wide floppy brim and nothing drawn '
+      + 'on it, and a short wooden wand'
   }
 };
 
@@ -1752,6 +1774,62 @@ const STORY_SCENES = {
     'the child sitting on a porch swing watching the sunset',
     'the child blowing out candles on a birthday cake',
     'the child waving warmly from a front porch, welcoming guests'
+  ],
+  // The holidays are for every audience - a kid, a grown-up star, siblings or a
+  // whole family - so every line has to read with any cast in place of "the
+  // child". That rules out guests, friends and relatives (the cast is the
+  // party), and anything written down: no banners, no names on cakes, no gift
+  // tags, no letters to Santa. Halloween is cute, never scary.
+  'Birthday': [
+    'the child wakes up on birthday morning to a bedroom full of balloons',
+    'the child puts on a paper party hat in front of a mirror, beaming',
+    'the child hangs paper streamers and balloons around the living room',
+    'the child mixes birthday cake batter in a big bowl, flour everywhere',
+    'the child decorates the birthday cake with sprinkles and swirls of frosting',
+    'the child blows up a giant balloon, cheeks puffed out',
+    'the child pops bubbles from a big bubble wand in the party garden',
+    'the child swings at a star-shaped piñata as candy tumbles out',
+    'the child dances to party music under paper lanterns',
+    'the child makes a wish over the glowing candles on the birthday cake, eyes closed',
+    'the child blows out the candles on the birthday cake in one big breath',
+    'the child enjoys a big slice of birthday cake at the party table, frosting on their nose',
+    'the child unwraps a big present, ribbon and wrapping paper flying',
+    'the child flies a new kite in the backyard, party hat still on',
+    'the child falls asleep at the end of the big day, hugging a balloon on a string'
+  ],
+  'Christmas': [
+    'the child presses their nose to an icy window, watching the first snow fall',
+    'the child builds a snowman with a carrot nose and stick arms in the snowy yard',
+    'the child picks out a Christmas tree at a snowy tree farm',
+    'the child pulls the Christmas tree home on a wooden sled',
+    'the child decorates the Christmas tree with round ornaments and garland',
+    'the child places a shining star on top of the Christmas tree, standing on tiptoe',
+    'the child cuts out gingerbread cookies at the kitchen table',
+    'the child builds a gingerbread house covered in candy',
+    'the child hangs plain knitted stockings over the fireplace',
+    'the child zooms down a snowy hill on a sled',
+    'the child skates on a frozen pond under twinkling lights',
+    'the child leaves a plate of cookies and a glass of milk for Santa by the fireplace',
+    'the child spots Santa\'s sleigh and reindeer flying past the moon from the bedroom window',
+    'the child unwraps presents under the Christmas tree on Christmas morning',
+    'the child sips hot cocoa by the fire, wrapped in a blanket, as snow falls outside'
+  ],
+  'Halloween': [
+    'the child picks out a big round pumpkin at a sunny pumpkin patch',
+    'the child carves a smiling face into the pumpkin at the kitchen table',
+    'the child sets the glowing jack-o\'-lantern on the front steps',
+    'the child decorates the porch with paper bats and a friendly scarecrow',
+    'the child twirls in front of a mirror, all dressed up for Halloween',
+    'the child sets off trick-or-treating at dusk, holding a pumpkin-shaped candy bucket',
+    'the child waves at a small smiling ghost peeking out from behind a tree',
+    'the child rings the doorbell of a porch lined with smiling jack-o\'-lanterns',
+    'the child finds a big bowl of candy waiting on a porch step',
+    'the child meets a fluffy black cat wearing a tiny bow',
+    'the child walks through a moonlit pumpkin field as friendly bats flutter overhead',
+    'the child dances with a giggling friendly ghost under a big round moon',
+    'the child bobs for apples in a big tub of water',
+    'the child sorts the Halloween candy into piles on the living room rug',
+    'the child snuggles under a blanket on the couch at the end of Halloween night, a smiling jack-o\'-lantern glowing on the windowsill'
   ]
 };
 
