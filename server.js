@@ -1435,7 +1435,7 @@ const THEME_OUTFITS = {
   'Birthday': {
     from: 0,
     outfit: 'a party outfit - a cone-shaped paper party hat with a small pom-pom on top and '
-      + 'nothing drawn on it, held on by a thin elastic under the chin, a smart plain party '
+      + 'nothing drawn on it, held on by a thin elastic under the chin - draw the whole hat, pom-pom included, inside the picture with clear space above it, never cut off by the top edge - a smart plain party '
       + 'top with a bow at the collar, neat trousers or a twirly skirt, and shiny party shoes'
   },
   'Christmas': {
@@ -1448,7 +1448,7 @@ const THEME_OUTFITS = {
     from: 0,
     outfit: 'a friendly wizard costume - a long plain wizard robe with wide sleeves and a '
       + 'simple tie belt, a tall pointed wizard hat with a wide floppy brim and nothing drawn '
-      + 'on it, and a short wooden wand'
+      + 'on it - draw the whole hat, tip included, inside the picture with clear space above it, never cut off by the top edge - and a short wooden wand'
   }
 };
 
@@ -1816,7 +1816,7 @@ const STORY_SCENES = {
   ],
   'Halloween': [
     'the child picks out a big round pumpkin at a sunny pumpkin patch',
-    'the child carves a smiling face into the pumpkin at the kitchen table',
+    'the child scoops the seeds out of a big pumpkin with a wooden spoon at the kitchen table',
     'the child sets the glowing jack-o\'-lantern on the front steps',
     'the child decorates the porch with paper bats and a friendly scarecrow',
     'the child twirls in front of a mirror, all dressed up for Halloween',
