@@ -3128,7 +3128,9 @@ const supportBot = createSupportBot({
   },
   openaiKey: process.env.OPENAI_API_KEY,
   model: process.env.SUPPORT_BOT_MODEL || 'gpt-5.4-mini',
-  alertEmail: ALERT_EMAIL,
+  // Where "needs you" emails and the daily round-up go. Separate from the
+  // watchdog's ALERT_EMAIL so it can point at whichever inbox Jonathan reads on the road.
+  alertEmail: process.env.SUPPORT_ALERT_EMAIL || ALERT_EMAIL,
   from: process.env.MAIL_FROM || 'support@crayonauts.com'
 });
 const SUPPORT_BOT_ON = process.env.SUPPORT_BOT_ENABLED === 'true';
@@ -3157,9 +3159,10 @@ async function runAssistantDay() {
     'Passed to you: ' + (escalated.length + held.length), ...escalated.concat(held).map(line),
     'Ignored (spam/automated): ' + ignored.length
   ];
-  if (ALERT_EMAIL && mailer.configured) {
+  const roundupTo = process.env.SUPPORT_ALERT_EMAIL || ALERT_EMAIL;
+  if (roundupTo && mailer.configured) {
     const mail = mailer.plainEmail(lines.join('\n'));
-    await mailer.sendMail({ to: ALERT_EMAIL, subject: '[Crayonauts] Daily: ' + claims.length + ' free books, '
+    await mailer.sendMail({ to: roundupTo, subject: '[Crayonauts] Daily: ' + claims.length + ' free books, '
       + replied.length + ' emails answered', text: mail.text, html: mail.html });
   }
   return true;
