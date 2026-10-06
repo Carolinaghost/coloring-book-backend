@@ -57,15 +57,15 @@
 // Transfers move money from the Crayonauts balance into the creator's Stripe
 // account. Stripe pays it on to their bank on its own schedule.
 //
-// SEND BY WEDNESDAY. Creators are told they are paid on Friday, and that
-// means the money is in their bank on Friday - not that it left here on
-// Friday. A transfer lands in their Stripe balance at once, but Stripe's
-// payout from there to their bank is a direct deposit, and a direct deposit
-// takes about two business days to arrive. So the transfer has to go out by
-// Wednesday for Friday to be true. Run it on Thursday or Friday and it still
-// works - it only warns, because there can be a good reason to send late -
-// but the creator will most likely see the money on Monday or Tuesday, and
-// will reasonably think they were paid late, because they were.
+// SEND ON TUESDAY. Creator payday is Tuesday (Jonathan, 6 Oct 2026): the pay
+// week closes Friday night, the report arrives Saturday morning, and the
+// transfers go out on Tuesday. A transfer lands in their Stripe balance at
+// once; Stripe's payout from there to their bank is a direct deposit, which
+// usually shows within about two business days - creators are told that.
+// The company's own automatic payout is on Wednesday, the day after, so the
+// balance the transfers need is still there on Tuesday. Run it Wednesday to
+// Friday and it still works - it only warns, because there can be a good
+// reason to send late - but the creator was told Tuesday.
 
 const db = require('../db');
 const {
@@ -89,13 +89,12 @@ function parseArgs(argv) {
   };
 }
 
-// Thursday and Friday, in the pay week's own time zone. Saturday through
-// Wednesday leaves the two business days a direct deposit needs to reach a
-// creator's bank by the Friday they were promised.
-const LATE_DAYS = new Set(['Thu', 'Fri']);
-const LATE_WARNING = "Warning: transfers sent today likely won't reach creators' banks by Friday - "
-  + "Stripe's payout typically takes about 2 business days. Send by Wednesday for an on-time Friday payday.";
-function tooLateForFriday(now, tz) {
+// Wednesday to Friday, in the pay week's own time zone: past Tuesday payday.
+// From Saturday on, the next pay week has closed and this run pays that one.
+const LATE_DAYS = new Set(['Wed', 'Thu', 'Fri']);
+const LATE_WARNING = 'Warning: creator payday was Tuesday - these transfers are going out late. '
+  + 'Send on Tuesdays so creators are paid on time.';
+function tooLateForPayday(now, tz) {
   const day = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(now);
   return LATE_DAYS.has(day);
 }
@@ -273,7 +272,7 @@ async function main(deps = {}) {
   print(`\nCreator payouts  (${mode}${live ? '' : ' - nothing is sent; add --send to pay'})`);
   print(`Pay week  ${label}  ${owed.tz}\n`);
   // A warning, never a stop: late is sometimes the right call, and he decides.
-  if (tooLateForFriday(deps.now ? new Date(deps.now) : new Date(), owed.tz)) print(LATE_WARNING + '\n');
+  if (tooLateForPayday(deps.now ? new Date(deps.now) : new Date(), owed.tz)) print(LATE_WARNING + '\n');
 
   const show = (l) => {
     const who = l.creator ? `${l.creator.name} <${l.creator.email}>` : '';
@@ -335,6 +334,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  parseArgs, limits, planPayouts, transferGroup, tooLateForFriday, main,
+  parseArgs, limits, planPayouts, transferGroup, tooLateForPayday, main,
   DEFAULT_MAX_PER_CREATOR_CENTS, DEFAULT_MAX_TOTAL_CENTS
 };
