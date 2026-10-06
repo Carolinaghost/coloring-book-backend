@@ -468,8 +468,6 @@ function reviewAskEmail({ name, reviewUrl }) {
     'If you have a minute, an honest review would help our small family business a lot:',
     reviewUrl,
     '',
-    'A photo of them coloring would be amazing too - just reply to this email with it.',
-    '',
     "Haven't made your book yet? Your code still works at crayonauts.com.",
     '',
     'Thank you!',
@@ -482,7 +480,6 @@ function reviewAskEmail({ name, reviewUrl }) {
     '<p>If you have a minute, an honest review would help our small family business a lot:</p>',
     '<p><a href="' + reviewUrl + '" style="display:inline-block;background:#E8622C;color:#fff;padding:10px 18px;'
     + 'border-radius:999px;text-decoration:none;font-weight:bold;">Leave a review</a></p>',
-    '<p>A photo of them coloring would be amazing too &mdash; just reply to this email with it.</p>',
     '<p style="font-size:13px;color:#6B6357;">Haven&rsquo;t made your book yet? Your code still works at crayonauts.com.</p>',
     '<p>Thank you!<br>Crayonauts</p>',
     '</div>'
