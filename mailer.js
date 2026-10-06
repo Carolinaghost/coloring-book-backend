@@ -90,7 +90,10 @@ function base64Lines(buffer) {
 // creators up, accounts@ handles what they get paid. A creator whose welcome
 // arrives from support@ replies to support@, and their question lands in the
 // queue meant for parents whose book has not turned up.
-function buildMessage({ to, subject, text, html, attachments, from, replyTo }) {
+function buildMessage({ to, subject, text, html, attachments, from, replyTo, headers: extra }) {
+  // Extra headers, e.g. In-Reply-To so a reply lands in the customer's thread.
+  // CR/LF stripped so nothing a customer wrote can smuggle in a header.
+  const extraLines = (extra || []).map((h) => String(h).replace(/[\r\n]+/g, ' '));
   const alt = 'alt_' + Math.random().toString(36).slice(2);
   const sender = from || FROM;
   const answers = replyTo || sender;
@@ -118,6 +121,7 @@ function buildMessage({ to, subject, text, html, attachments, from, replyTo }) {
       'Subject: ' + subject,
       'MIME-Version: 1.0',
       'Date: ' + new Date().toUTCString(),
+      ...extraLines,
       'Content-Type: multipart/alternative; boundary="' + alt + '"'
     ].join('\r\n');
     return headers + '\r\n\r\n' + altPart;
@@ -134,6 +138,7 @@ function buildMessage({ to, subject, text, html, attachments, from, replyTo }) {
     'Subject: ' + subject,
     'MIME-Version: 1.0',
     'Date: ' + new Date().toUTCString(),
+    ...extraLines,
     'Content-Type: multipart/mixed; boundary="' + mixed + '"'
   ].join('\r\n');
 
@@ -159,7 +164,7 @@ function buildMessage({ to, subject, text, html, attachments, from, replyTo }) {
   return headers + '\r\n' + parts.join('\r\n');
 }
 
-async function sendMail({ to, subject, text, html, attachments, from, replyTo }) {
+async function sendMail({ to, subject, text, html, attachments, from, replyTo, headers }) {
   if (!configured) throw new Error('SMTP_USER / SMTP_PASS are not set.');
   // The envelope sender follows the header, or the two disagree and every
   // receiver that checks alignment - which is all of them now - marks it down.
@@ -187,7 +192,7 @@ async function sendMail({ to, subject, text, html, attachments, from, replyTo })
     await say(socket, 'RCPT TO:<' + to + '>', [250, 251]);
     await say(socket, 'DATA', [354]);
 
-    socket.write(dotStuff(buildMessage({ to, subject, text, html, attachments, from: sender, replyTo })) + '\r\n.\r\n');
+    socket.write(dotStuff(buildMessage({ to, subject, text, html, attachments, from: sender, replyTo, headers })) + '\r\n.\r\n');
     await readReply(socket, [250]);
 
     try { await say(socket, 'QUIT', [221]); } catch (e) { /* some servers just hang up */ }
@@ -407,10 +412,95 @@ function creatorPayoutSetupEmail({ name, setupUrl }) {
 
 // Only ever wraps values that came off a form, so it covers the five that
 // matter and does not pretend to be a sanitiser.
+// The free-book giveaway: the code, and how to use it.
+function giveawayCodeEmail({ name, code, siteUrl }) {
+  const first = String(name || '').trim().split(/\s+/)[0] || 'there';
+  const subject = 'Your free Crayonauts book - code ' + code;
+  const text = [
+    'Hi ' + first + ',',
+    '',
+    'Here is your free coloring book code: ' + code,
+    '',
+    '1. Go to ' + siteUrl,
+    '2. Upload a clear photo of your child facing the camera. You will see 2 pages free.',
+    '3. Press Unlock and type ' + code + ' at checkout. The price goes to $0.',
+    '',
+    'The code works once. Your book arrives as a printable PDF you can print as many',
+    'times as you like.',
+    '',
+    'All we ask in return: once your little one has colored a few pages, leave us an',
+    'honest review. We will send you a quick reminder in a few days.',
+    '',
+    'Questions? Just reply to this email.',
+    '',
+    '- Crayonauts'
+  ].join('\n');
+  const html = [
+    '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
+    '<h2 style="color:#2F5FA8;">Your free book, ' + escapeHtml(first) + '</h2>',
+    '<div style="background:#F6F4EF;border-radius:10px;padding:16px 18px;margin:18px 0;">',
+    '<p style="margin:0 0 6px;font-size:13px;color:#6B6357;">Your code</p>',
+    '<p style="margin:0;font-size:24px;font-weight:bold;letter-spacing:1px;">' + escapeHtml(code) + '</p>',
+    '</div>',
+    '<ol style="padding-left:20px;line-height:1.6;">',
+    '<li>Go to <a href="' + siteUrl + '">' + escapeHtml(siteUrl.replace(/^https?:\/\//, '')) + '</a></li>',
+    '<li>Upload a clear photo of your child facing the camera. You&rsquo;ll see 2 pages free.</li>',
+    '<li>Press <strong>Unlock</strong> and type <strong>' + escapeHtml(code) + '</strong> at checkout. The price goes to $0.</li>',
+    '</ol>',
+    '<p>The code works once. Your book arrives as a printable PDF you can print as many times as you like.</p>',
+    '<p>All we ask in return: once your little one has colored a few pages, leave us an honest review. '
+    + 'We&rsquo;ll send you a quick reminder in a few days.</p>',
+    '<p style="font-size:13px;color:#6B6357;">Questions? Just reply to this email.</p>',
+    '</div>'
+  ].join('');
+  return { subject, text, html };
+}
+
+// A few days after a giveaway claim: the review we asked for.
+function reviewAskEmail({ name, reviewUrl }) {
+  const first = String(name || '').trim().split(/\s+/)[0] || 'there';
+  const subject = 'How did the coloring book go?';
+  const text = [
+    'Hi ' + first + ',',
+    '',
+    'Hope your little one is enjoying their Crayonauts book!',
+    '',
+    'If you have a minute, an honest review would help our small family business a lot:',
+    reviewUrl,
+    '',
+    'A photo of them coloring would be amazing too - just reply to this email with it.',
+    '',
+    "Haven't made your book yet? Your code still works at crayonauts.com.",
+    '',
+    'Thank you!',
+    '- Crayonauts'
+  ].join('\n');
+  const html = [
+    '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
+    '<p>Hi ' + escapeHtml(first) + ',</p>',
+    '<p>Hope your little one is enjoying their Crayonauts book!</p>',
+    '<p>If you have a minute, an honest review would help our small family business a lot:</p>',
+    '<p><a href="' + reviewUrl + '" style="display:inline-block;background:#E8622C;color:#fff;padding:10px 18px;'
+    + 'border-radius:999px;text-decoration:none;font-weight:bold;">Leave a review</a></p>',
+    '<p>A photo of them coloring would be amazing too &mdash; just reply to this email with it.</p>',
+    '<p style="font-size:13px;color:#6B6357;">Haven&rsquo;t made your book yet? Your code still works at crayonauts.com.</p>',
+    '<p>Thank you!<br>Crayonauts</p>',
+    '</div>'
+  ].join('');
+  return { subject, text, html };
+}
+
+// Plain text from the support assistant, with a matching HTML part.
+function plainEmail(text) {
+  const html = '<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;color:#2A2724;'
+    + 'white-space:pre-wrap;line-height:1.5;">' + escapeHtml(text) + '</div>';
+  return { text, html };
+}
+
 function escapeHtml(v) {
   return String(v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-module.exports = { sendMail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, creatorPayoutSetupEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
+module.exports = { sendMail, giveawayCodeEmail, reviewAskEmail, plainEmail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, creatorPayoutSetupEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
