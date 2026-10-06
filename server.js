@@ -12,6 +12,7 @@ const creatorPayouts = require('./creator-payouts');
 const mirrorGuard = require('./mirror-guard');
 const { buildBookPdf, pdfFileName } = require('./pdf');
 const watchdog = require('./watchdog');
+const { createSupportBot } = require('./support-bot');
 const { main: affiliateReport, saturdayArgs, DEFAULT_REPORT_RATES } = require('./scripts/affiliate-report.js');
 const neon = require('./neon');
 const textGuard = require('./text-guard');
@@ -517,7 +518,7 @@ function freeBookCode() {
 // money - and free_code stays empty, which is what tells somebody to send one
 // by hand. Failing the whole sign-up over a free book would be the wrong way
 // round.
-async function mintFreeBookCode({ name, email }) {
+async function mintFreeBookCode({ name, email, purpose = 'creator free book' }) {
   if (!STRIPE_SECRET_KEY) return null;
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = freeBookCode();
@@ -528,7 +529,7 @@ async function mintFreeBookCode({ name, email }) {
       form.append('promotion[coupon]', CREATOR_FREE_COUPON);
       form.append('code', code);
       form.append('max_redemptions', '1');
-      form.append('metadata[purpose]', 'creator free book');
+      form.append('metadata[purpose]', purpose);
       form.append('metadata[creator_name]', name);
       form.append('metadata[creator_email]', email);
       const resp = await fetch('https://api.stripe.com/v1/promotion_codes', {
@@ -731,6 +732,92 @@ app.post('/creators/resend', async (req, res) => {
     console.error('Could not resend a creator code:', err.message);
   }
 });
+
+// ---------------------------------------------------------------------------
+// The free-book giveaway (crayonauts.com/free.html).
+//
+// A parent leaves their email and gets a single-use 100%-off code, on screen
+// and by email, so nobody has to wait for Jonathan to answer a message. One
+// code per email (asking again shows the same code), a few claims per IP per
+// day, and a hard cap: once GIVEAWAY_CAP codes exist the page says they are
+// gone. A few days later the daily job asks each of them for a review.
+const GIVEAWAY_CAP = parseInt(process.env.GIVEAWAY_CAP, 10) || 100;
+const GIVEAWAY_CLAIMS_PER_IP = 3;
+const GIVEAWAY_REVIEW_AFTER_DAYS = 5;
+const REVIEW_URL = process.env.REVIEW_URL || 'https://www.facebook.com/crayonauts/reviews';
+
+app.get('/giveaway/status', async (req, res) => {
+  try {
+    const used = await db.countGiveawayClaims();
+    const remaining = Math.max(0, GIVEAWAY_CAP - used);
+    res.json({ open: remaining > 0, remaining, cap: GIVEAWAY_CAP });
+  } catch (err) {
+    console.error('Could not read the giveaway count:', err.message);
+    res.status(503).json({ error: 'Could not check just now. Try again in a minute.' });
+  }
+});
+
+app.post('/giveaway/claim', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase().slice(0, 254);
+  const name = String(req.body.name || '').trim().slice(0, 80);
+  const source = String(req.body.source || '').trim().slice(0, 40);
+  if (!looksLikeEmail(email)) return res.status(400).json({ error: 'That email does not look right.' });
+
+  try {
+    // Asked before: same code back, no new one, no IP allowance spent.
+    const existing = await db.getGiveawayClaim(email);
+    if (existing) {
+      res.json({ code: existing.code, again: true });
+      sendGiveawayEmail(existing).catch(() => {});
+      return;
+    }
+    const quota = await db.takeSignupQuota('giveaway|' + clientIp(req), previewDay(), GIVEAWAY_CLAIMS_PER_IP);
+    if (!quota.allowed) {
+      return res.status(429).json({ error: 'That is enough free books from here for today. Email support@crayonauts.com if something went wrong.' });
+    }
+    if (await db.countGiveawayClaims() >= GIVEAWAY_CAP) {
+      return res.status(410).json({ error: 'All the free books have been claimed. Thank you for the interest!', closed: true });
+    }
+    const minted = await mintFreeBookCode({ name: name || email, email, purpose: 'giveaway free book' });
+    if (!minted) return res.status(502).json({ error: 'Could not make your code just now. Try again in a minute.' });
+    let claim = await db.saveGiveawayClaim({ email, name, code: minted.code, promoId: minted.promoId, source });
+    // Lost a race with a second click from the same email: theirs stands.
+    if (!claim) claim = await db.getGiveawayClaim(email);
+    res.json({ code: claim.code, again: false });
+    console.log('Giveaway: free book code claimed' + (source ? ' (from ' + source + ')' : '') + '.');
+    await sendGiveawayEmail(claim);
+  } catch (err) {
+    console.error('Giveaway claim failed:', err.message);
+    if (!res.headersSent) res.status(503).json({ error: 'Could not make your code just now. Try again in a minute.' });
+  }
+});
+
+async function sendGiveawayEmail(claim) {
+  if (!mailer.configured) return;
+  try {
+    const mail = mailer.giveawayCodeEmail({ name: claim.name, code: claim.code, siteUrl: SITE_URL });
+    await mailer.sendMail({ to: claim.email, subject: mail.subject, text: mail.text, html: mail.html });
+  } catch (err) {
+    console.error('Giveaway email failed:', err.message);
+  }
+}
+
+// Once a day: the review ask for anyone who claimed five or more days ago.
+async function sendGiveawayReviewAsks() {
+  if (!mailer.configured) return 0;
+  let sent = 0;
+  for (const claim of await db.claimsNeedingReviewAsk(GIVEAWAY_REVIEW_AFTER_DAYS)) {
+    try {
+      const mail = mailer.reviewAskEmail({ name: claim.name, reviewUrl: REVIEW_URL });
+      await mailer.sendMail({ to: claim.email, subject: mail.subject, text: mail.text, html: mail.html });
+      await db.markReviewAsked(claim.email);
+      sent++;
+    } catch (err) {
+      console.error('Review ask failed:', err.message);
+    }
+  }
+  return sent;
+}
 
 async function sendCreatorWelcome(creator, free) {
   const { code, name, email } = creator;
@@ -3027,6 +3114,80 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 // ---------------------------------------------------------------------------
+// The support@ assistant (support-bot.js) and its daily round-up.
+//
+// Off unless SUPPORT_BOT_ENABLED=true, so it can be switched off on Render in
+// one click without a deploy. It needs the support@ IMAP app password
+// (SUPPORT_IMAP_PASS) and the OpenAI key the drawings already use.
+const supportBot = createSupportBot({
+  db, mailer,
+  imap: {
+    host: process.env.SUPPORT_IMAP_HOST || 'imappro.zoho.com',
+    user: process.env.SUPPORT_IMAP_USER || 'support@crayonauts.com',
+    pass: process.env.SUPPORT_IMAP_PASS || ''
+  },
+  openaiKey: process.env.OPENAI_API_KEY,
+  model: process.env.SUPPORT_BOT_MODEL || 'gpt-5.4-mini',
+  alertEmail: ALERT_EMAIL,
+  from: process.env.MAIL_FROM || 'support@crayonauts.com'
+});
+const SUPPORT_BOT_ON = process.env.SUPPORT_BOT_ENABLED === 'true';
+
+// Once a day, around 9am Eastern: review asks for giveaway claims, then one
+// email to Jonathan saying what the giveaway and the assistant did.
+async function runAssistantDay() {
+  const since = new Date(Date.now() - 86400000);
+  const reviewAsks = await sendGiveawayReviewAsks();
+  const claims = await db.giveawayClaimsSince(since);
+  const used = await db.countGiveawayClaims();
+  const mails = await db.botEmailsSince(since);
+  const counted = (a) => mails.filter((m) => m.action === a);
+  const replied = counted('replied'); const escalated = counted('escalated');
+  const held = counted('held'); const ignored = counted('ignored');
+  if (!claims.length && !reviewAsks && !replied.length && !escalated.length && !held.length) return false;
+  const line = (m) => '  - ' + m.from_addr + ': ' + (m.summary || m.subject);
+  const lines = [
+    'Last 24 hours:',
+    '',
+    'Free books claimed: ' + claims.length + ' (' + Math.max(0, GIVEAWAY_CAP - used) + ' of ' + GIVEAWAY_CAP + ' left)',
+    ...claims.map((c) => '  - ' + c.email + ' -> ' + c.code + (c.source ? ' (' + c.source + ')' : '')),
+    'Review requests sent: ' + reviewAsks,
+    '',
+    'Support emails answered by the assistant: ' + replied.length, ...replied.map(line),
+    'Passed to you: ' + (escalated.length + held.length), ...escalated.concat(held).map(line),
+    'Ignored (spam/automated): ' + ignored.length
+  ];
+  if (ALERT_EMAIL && mailer.configured) {
+    const mail = mailer.plainEmail(lines.join('\n'));
+    await mailer.sendMail({ to: ALERT_EMAIL, subject: '[Crayonauts] Daily: ' + claims.length + ' free books, '
+      + replied.length + ' emails answered', text: mail.text, html: mail.html });
+  }
+  return true;
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  if (SUPPORT_BOT_ON && supportBot.configured) {
+    console.log('Support assistant is on.');
+    setInterval(() => {
+      supportBot.pollOnce().catch((err) => console.error('Support assistant check failed:', err.message));
+    }, 5 * 60 * 1000).unref();
+    setTimeout(() => supportBot.pollOnce().catch((err) => console.error('Support assistant check failed:', err.message)), 30 * 1000).unref();
+  } else {
+    console.log('Support assistant is off' + (SUPPORT_BOT_ON ? ' (missing SUPPORT_IMAP_PASS, OPENAI_API_KEY or mail settings).' : '.'));
+  }
+  setInterval(async () => {
+    const now = new Date();
+    if (now.getUTCHours() !== 13) return;
+    try {
+      if (!(await db.claimJobRun('assistant-day', now.toISOString().slice(0, 10)))) return;
+      await runAssistantDay();
+    } catch (err) {
+      console.error('Assistant daily round-up failed:', err.message);
+    }
+  }, 60 * 60 * 1000).unref();
+}
+
+// ---------------------------------------------------------------------------
 // Letting the database go to sleep.
 //
 // Neon bills compute by time awake, not by queries, and suspends after about
@@ -3305,6 +3466,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, supportBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };

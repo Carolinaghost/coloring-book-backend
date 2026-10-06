@@ -315,6 +315,43 @@ let lastError = null;
 // Runs in the background AFTER the server is already listening, so a sleeping
 // database can never stop the service from starting. Retries a few times to
 // ride out a cold Neon compute or a brief network blip.
+// The free-book giveaway (crayonauts.com/free.html). One row per email: a
+// second claim from the same address gets the code it already has, not
+// another one. The table is also the cap - counting rows is how the page
+// knows when the free books are gone.
+const CREATE_GIVEAWAY_SQL = `
+  CREATE TABLE IF NOT EXISTS giveaway_claims (
+    email           TEXT        PRIMARY KEY,
+    name            TEXT        NOT NULL DEFAULT '',
+    code            TEXT        NOT NULL,
+    promo_id        TEXT        NOT NULL DEFAULT '',
+    source          TEXT        NOT NULL DEFAULT '',
+    claimed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    review_asked_at TIMESTAMPTZ
+  );
+`;
+
+// The support@ inbox assistant. bot_emails is one row per message it looked
+// at, keyed on Message-ID so a message is never answered twice, and it is
+// also the record Jonathan's digest is built from. bot_state holds where the
+// assistant got to in the inbox, so a redeploy does not start over and
+// answer old mail.
+const CREATE_BOT_SQL = `
+  CREATE TABLE IF NOT EXISTS bot_emails (
+    message_id TEXT        PRIMARY KEY,
+    from_addr  TEXT        NOT NULL DEFAULT '',
+    subject    TEXT        NOT NULL DEFAULT '',
+    action     TEXT        NOT NULL,
+    summary    TEXT        NOT NULL DEFAULT '',
+    handled_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS bot_state (
+    key        TEXT        PRIMARY KEY,
+    value      TEXT        NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`;
+
 async function initDb(attempt = 1) {
   if (!usingPostgres) {
     console.warn(
@@ -334,6 +371,8 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_JOB_RUNS_SQL);
     for (const sql of CREATOR_MIGRATIONS) await pool.query(sql);
     await pool.query(CREATE_CREATOR_PAYOUTS_SQL);
+    await pool.query(CREATE_GIVEAWAY_SQL);
+    await pool.query(CREATE_BOT_SQL);
     ready = true;
     lastError = null;
     console.log('Connected to Postgres. Orders table is ready.');
@@ -1663,7 +1702,162 @@ async function claimJobRun(job, ranFor) {
   return rows.length > 0;
 }
 
+// ---------------------------------------------------------------------------
+// Giveaway claims and the support@ assistant (see CREATE_GIVEAWAY_SQL and
+// CREATE_BOT_SQL above).
+
+const memoryGiveaway = [];
+const memoryBotEmails = [];
+const memoryBotState = new Map();
+
+function rowToClaim(r) {
+  if (!r) return null;
+  return {
+    email: r.email, name: r.name || '', code: r.code, promoId: r.promo_id || '',
+    source: r.source || '', claimedAt: r.claimed_at, reviewAskedAt: r.review_asked_at || null
+  };
+}
+
+async function countGiveawayClaims() {
+  if (!usingPostgres) return memoryGiveaway.length;
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM giveaway_claims');
+  return rows[0].n;
+}
+
+async function getGiveawayClaim(email) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!usingPostgres) return rowToClaim(memoryGiveaway.find((r) => r.email === e));
+  const { rows } = await pool.query('SELECT * FROM giveaway_claims WHERE email = $1', [e]);
+  return rowToClaim(rows[0]);
+}
+
+// Returns the saved claim, or null when that email beat us to it (two tabs,
+// two clicks) - the caller then reads back the one that won.
+async function saveGiveawayClaim({ email, name, code, promoId, source }) {
+  const row = {
+    email: String(email).trim().toLowerCase(), name: String(name || '').slice(0, 80),
+    code: String(code).toUpperCase(), promo_id: promoId || '', source: String(source || '').slice(0, 40)
+  };
+  if (!usingPostgres) {
+    if (memoryGiveaway.find((r) => r.email === row.email)) return null;
+    const saved = { ...row, claimed_at: new Date(), review_asked_at: null };
+    memoryGiveaway.push(saved);
+    return rowToClaim(saved);
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO giveaway_claims (email, name, code, promo_id, source)
+     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (email) DO NOTHING RETURNING *`,
+    [row.email, row.name, row.code, row.promo_id, row.source]
+  );
+  return rowToClaim(rows[0]);
+}
+
+async function claimsNeedingReviewAsk(olderThanDays) {
+  const cutoff = new Date(Date.now() - olderThanDays * 86400000);
+  if (!usingPostgres) {
+    return memoryGiveaway.filter((r) => !r.review_asked_at && r.claimed_at <= cutoff).map(rowToClaim);
+  }
+  const { rows } = await pool.query(
+    'SELECT * FROM giveaway_claims WHERE review_asked_at IS NULL AND claimed_at <= $1 ORDER BY claimed_at',
+    [cutoff]
+  );
+  return rows.map(rowToClaim);
+}
+
+async function markReviewAsked(email) {
+  const e = String(email).trim().toLowerCase();
+  if (!usingPostgres) {
+    const r = memoryGiveaway.find((x) => x.email === e);
+    if (r) r.review_asked_at = new Date();
+    return;
+  }
+  await pool.query('UPDATE giveaway_claims SET review_asked_at = NOW() WHERE email = $1', [e]);
+}
+
+async function giveawayClaimsSince(since) {
+  if (!usingPostgres) return memoryGiveaway.filter((r) => r.claimed_at >= since).map(rowToClaim);
+  const { rows } = await pool.query(
+    'SELECT * FROM giveaway_claims WHERE claimed_at >= $1 ORDER BY claimed_at', [since]);
+  return rows.map(rowToClaim);
+}
+
+async function botEmailSeen(messageId) {
+  if (!usingPostgres) return memoryBotEmails.some((r) => r.message_id === messageId);
+  const { rows } = await pool.query('SELECT 1 FROM bot_emails WHERE message_id = $1', [messageId]);
+  return rows.length > 0;
+}
+
+async function saveBotEmail({ messageId, from, subject, action, summary }) {
+  const row = {
+    message_id: String(messageId).slice(0, 500), from_addr: String(from || '').slice(0, 254),
+    subject: String(subject || '').slice(0, 300), action: String(action),
+    summary: String(summary || '').slice(0, 1000)
+  };
+  if (!usingPostgres) {
+    if (!memoryBotEmails.some((r) => r.message_id === row.message_id)) {
+      memoryBotEmails.push({ ...row, handled_at: new Date() });
+    }
+    return;
+  }
+  await pool.query(
+    `INSERT INTO bot_emails (message_id, from_addr, subject, action, summary)
+     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (message_id) DO NOTHING`,
+    [row.message_id, row.from_addr, row.subject, row.action, row.summary]
+  );
+}
+
+// Replies the assistant has sent, to one address or to anyone, since a time.
+// What stops two auto-responders answering each other forever.
+async function countBotReplies({ to, since }) {
+  const replied = (r) => r.action === 'replied' || r.action === 'escalated';
+  if (!usingPostgres) {
+    return memoryBotEmails.filter((r) => replied(r) && r.handled_at >= since
+      && (!to || r.from_addr === to)).length;
+  }
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM bot_emails
+      WHERE action IN ('replied', 'escalated') AND handled_at >= $1
+        AND ($2::text IS NULL OR from_addr = $2)`,
+    [since, to || null]
+  );
+  return rows[0].n;
+}
+
+async function botEmailsSince(since) {
+  if (!usingPostgres) return memoryBotEmails.filter((r) => r.handled_at >= since);
+  const { rows } = await pool.query(
+    'SELECT * FROM bot_emails WHERE handled_at >= $1 ORDER BY handled_at', [since]);
+  return rows;
+}
+
+async function getBotState(key) {
+  if (!usingPostgres) return memoryBotState.has(key) ? memoryBotState.get(key) : null;
+  const { rows } = await pool.query('SELECT value FROM bot_state WHERE key = $1', [key]);
+  return rows.length ? rows[0].value : null;
+}
+
+async function setBotState(key, value) {
+  if (!usingPostgres) { memoryBotState.set(key, String(value)); return; }
+  await pool.query(
+    `INSERT INTO bot_state (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [key, String(value)]
+  );
+}
+
 module.exports = {
+  countGiveawayClaims,
+  getGiveawayClaim,
+  saveGiveawayClaim,
+  claimsNeedingReviewAsk,
+  markReviewAsked,
+  giveawayClaimsSince,
+  botEmailSeen,
+  saveBotEmail,
+  countBotReplies,
+  botEmailsSince,
+  getBotState,
+  setBotState,
   // Scripts that need raw SQL (scripts/reencode-pages.js) reach the pool here.
   // Null when running on the in-memory store, which those scripts check for.
   get pool() { return pool; },
