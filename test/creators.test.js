@@ -220,7 +220,7 @@ async function main() {
     // the creator page and this email all have to agree on both. The week
     // closes Friday night; the money moves the Friday after.
     check('it names the pay day, which is Friday',
-      /paid the Friday after it closes/.test(sent[0].text), true);
+      /paid out the Tuesday after it closes/.test(sent[0].text), true);
     check('and names the week the way creators.html does',
       /The pay week runs Saturday 12:00am to Friday 11:59pm, US Eastern\./.test(sent[0].text), true);
     check('in the HTML version too',

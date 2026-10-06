@@ -166,23 +166,22 @@ async function main() {
   check('leaves off anybody owed nothing', lineFor(dry, 'QUIET'), '');
   check('and totals what it would send', /Would send: \$24\.00 to 3 creator\(s\)\./.test(dry.text), true);
 
-  console.log('\nSending in time for Friday');
-  // Payday is Friday in the creator's bank, and a direct deposit takes about
-  // two business days, so the transfer has to leave by Wednesday.
-  check('no warning on the Saturday the week closes', /won't reach creators' banks/.test(dry.text), false);
-  const wed = await run([], ENV, new Date('2026-08-26T20:00:00Z'));   // Wed 4pm New York
-  check('none on the Wednesday, the last on-time day', /won't reach creators' banks/.test(wed.text), false);
-  const thu = await run([], ENV, new Date('2026-08-27T13:00:00Z'));   // Thu 9am New York
-  check('a plain warning from Thursday', /Warning: transfers sent today likely won't reach creators' banks by Friday/
-    .test(thu.text), true);
-  check('that says when to send instead', /Send by Wednesday for an on-time Friday payday/.test(thu.text), true);
+  console.log('\nSending on Tuesday, creator payday');
+  // Payday is Tuesday (6 Oct 2026). The week closes Friday night, the report
+  // comes Saturday, and anything sent Saturday to Tuesday is on time.
+  const W = /creator payday was Tuesday/;
+  check('no warning on the Saturday the week closes', W.test(dry.text), false);
+  const tue = await run([], ENV, new Date('2026-08-25T20:00:00Z'));   // Tue 4pm New York
+  check('none on Tuesday, payday itself', W.test(tue.text), false);
+  const thu = await run([], ENV, new Date('2026-08-26T13:00:00Z'));   // Wed 9am New York
+  check('a plain warning from Wednesday', W.test(thu.text), true);
+  check('that says when to send instead', /Send on Tuesdays so creators are paid on time/.test(thu.text), true);
   check('and it is still the same week, not a later one', /Pay week  Sat, Aug 15/.test(thu.text), true);
-  check('Friday warns too', /won't reach creators' banks/.test(
-    (await run([], ENV, new Date('2026-08-28T13:00:00Z'))).text), true);
-  // The warning is in New York's day, not the server's: 1am UTC on Thursday
-  // is still Wednesday evening there.
+  check('Friday warns too', W.test((await run([], ENV, new Date('2026-08-28T13:00:00Z'))).text), true);
+  // The warning is in New York's day, not the server's: 1am UTC on Wednesday
+  // is still Tuesday evening there.
   check('counted in the pay week\'s time zone, not UTC',
-    pay.tooLateForFriday(new Date('2026-08-27T01:00:00Z'), 'America/New_York'), false);
+    pay.tooLateForPayday(new Date('2026-08-26T01:00:00Z'), 'America/New_York'), false);
   check('a warning, not a stop - it still plans the payments', /Would send: \$24\.00/.test(thu.text), true);
   check('and none of that sent anything', posts.length, 0);
 

@@ -314,7 +314,7 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent, freeCode }) {
     'You earn ' + rate + '% of every book bought through them.',
     '',
     'The pay week runs Saturday 12:00am to Friday 11:59pm, US Eastern.',
-    'Whatever sold in that week is paid the Friday after it closes.',
+    'Whatever sold in that week is paid out the Tuesday after it closes; most banks show it within 2 business days.',
     '',
     'One more thing: you will get a separate invite to set up how you get paid.',
     'That is where your tax form and your bank details go - please do not send',
@@ -348,7 +348,7 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent, freeCode }) {
     + 'price your audience pays.</p>',
     '<p style="font-size:17px;"><strong>You earn ' + rate + '% of every book bought through them.</strong></p>',
     '<p>The pay week runs Saturday 12:00am to Friday 11:59pm, US Eastern. Whatever sold in that '
-    + 'week is paid the Friday after it closes.</p>',
+    + 'week is paid out the Tuesday after it closes; most banks show it within 2 business days.</p>',
     '<p style="font-size:13px;color:#6B6357;">One more thing: you&rsquo;ll get a separate invite to set '
     + 'up how you get paid. That&rsquo;s where your tax form and your bank details go &mdash; please '
     + 'don&rsquo;t send either of those by email.</p>',

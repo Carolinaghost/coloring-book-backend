@@ -2968,11 +2968,11 @@ function localNow(at, tz) {
   };
 }
 
-// By Wednesday, because Friday payday means Friday in their bank, and a
-// direct deposit takes about two business days (see scripts/pay-creators.js).
+// Tuesday is creator payday; the company's own Stripe payout follows on
+// Wednesday (see scripts/pay-creators.js).
 const PAY_CREATORS_HINT = 'Next step, once these look right: node scripts/pay-creators.js '
   + 'shows exactly what would be sent, and adding --send pays everyone who is set up. '
-  + 'Send by Wednesday so it reaches their banks by Friday.';
+  + 'Send on Tuesday - that is creator payday.';
 
 async function runPayoutReport(at = new Date()) {
   const lines = [];

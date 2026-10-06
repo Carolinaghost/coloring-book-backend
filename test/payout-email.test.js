@@ -109,7 +109,7 @@ async function main() {
   check('and it points at the command that actually pays them',
     /node scripts\/pay-creators\.js/.test(sent[0].text) && /--send/.test(sent[0].text), true);
   check('and says to send it by Wednesday, so it lands by Friday',
-    /Send by Wednesday so it reaches their banks by Friday/.test(sent[0].text), true);
+    /Send on Tuesday - that is creator payday/.test(sent[0].text), true);
 
   console.log('\nRunning again the same morning');
   // The hourly timer comes round inside the same 8am hour, and Render
