@@ -164,7 +164,11 @@ function buildMessage({ to, subject, text, html, attachments, from, replyTo, hea
   return headers + '\r\n' + parts.join('\r\n');
 }
 
-async function sendMail({ to, subject, text, html, attachments, from, replyTo, headers }) {
+// envelopeTo: deliver to this address instead of `to`, while the To: header
+// still names `to`. That is exactly what a Bcc copy looks like to the Bcc
+// recipient - used for Trustpilot's invitation address, so the customer does
+// not get a second email.
+async function sendMail({ to, subject, text, html, attachments, from, replyTo, headers, envelopeTo }) {
   if (!configured) throw new Error('SMTP_USER / SMTP_PASS are not set.');
   // The envelope sender follows the header, or the two disagree and every
   // receiver that checks alignment - which is all of them now - marks it down.
@@ -189,7 +193,7 @@ async function sendMail({ to, subject, text, html, attachments, from, replyTo, h
     await say(socket, Buffer.from(PASS).toString('base64'), [235]);
 
     await say(socket, 'MAIL FROM:<' + sender + '>', [250]);
-    await say(socket, 'RCPT TO:<' + to + '>', [250, 251]);
+    await say(socket, 'RCPT TO:<' + (envelopeTo || to) + '>', [250, 251]);
     await say(socket, 'DATA', [354]);
 
     socket.write(dotStuff(buildMessage({ to, subject, text, html, attachments, from: sender, replyTo, headers })) + '\r\n.\r\n');
