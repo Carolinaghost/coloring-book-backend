@@ -495,6 +495,32 @@ function reviewAskEmail({ name, reviewUrl }) {
 }
 
 // Plain text from the support assistant, with a matching HTML part.
+// The printed copy has left Lulu. One email, with the tracking link.
+function printShippedEmail({ childName, trackingUrl }) {
+  const who = String(childName || '').trim();
+  const book = who ? who + "'s printed coloring book" : 'your printed coloring book';
+  const subject = (who ? book : 'Your printed coloring book') + ' is on its way';
+  const lines = [
+    'Good news: ' + book + ' has shipped.',
+    ''
+  ];
+  if (trackingUrl) lines.push('Track it here:', trackingUrl, '');
+  lines.push(trackingUrl ? 'It comes by regular mail, and the tracking link shows where it is.' : 'It comes by regular mail.', '',
+    'Questions? Just reply to this email.', '', '- Crayonauts');
+  const text = lines.join('\n');
+  const html = [
+    '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
+    '<p>Good news: ' + escapeHtml(book) + ' has shipped.</p>',
+    trackingUrl ? '<p><a href="' + escapeHtml(trackingUrl) + '" style="display:inline-block;background:#E8622C;color:#fff;'
+      + 'padding:10px 18px;border-radius:999px;text-decoration:none;font-weight:bold;">Track your book</a></p>' : '',
+    '<p>' + (trackingUrl ? 'It comes by regular mail, and the tracking link shows where it is.' : 'It comes by regular mail.') + '</p>',
+    '<p style="font-size:13px;color:#6B6357;">Questions? Just reply to this email.</p>',
+    '<p>Crayonauts</p>',
+    '</div>'
+  ].join('');
+  return { subject, text, html };
+}
+
 function plainEmail(text) {
   const html = '<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;color:#2A2724;'
     + 'white-space:pre-wrap;line-height:1.5;">' + escapeHtml(text) + '</div>';
@@ -507,4 +533,4 @@ function escapeHtml(v) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-module.exports = { sendMail, giveawayCodeEmail, reviewAskEmail, plainEmail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, creatorPayoutSetupEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
+module.exports = { sendMail, printShippedEmail, giveawayCodeEmail, reviewAskEmail, plainEmail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, creatorPayoutSetupEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };

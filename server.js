@@ -11,6 +11,8 @@ const mailer = require('./mailer');
 const creatorPayouts = require('./creator-payouts');
 const mirrorGuard = require('./mirror-guard');
 const { buildBookPdf, pdfFileName } = require('./pdf');
+const { createLulu } = require('./lulu');
+const { createPrintOrders } = require('./print-orders');
 const watchdog = require('./watchdog');
 const { createSupportBot } = require('./support-bot');
 const { main: affiliateReport, saturdayArgs, DEFAULT_REPORT_RATES } = require('./scripts/affiliate-report.js');
@@ -39,6 +41,22 @@ const PRICE_CENTS = parseInt(process.env.PRICE_CENTS, 10) || 1500;
 // so it carries its own price: $25 against $15 for a single subject.
 // FAMILY_PRICE_CENTS overrides it without a deploy.
 const FAMILY_PRICE_CENTS = parseInt(process.env.FAMILY_PRICE_CENTS, 10) || 2500;
+// Printed copies (print-orders.js). The printed copy itself is free; the
+// customer pays shipping and handling on top of the book. It is charged as a
+// Stripe shipping rate rather than a line item on purpose: discount codes
+// never touch shipping, so a 100%-off code still pays for the post.
+//
+// Lulu prints and mails them. PRINT_ENABLED=true turns the option on, and it
+// only shows if the Lulu keys are there too. LULU_SANDBOX=true sends every job
+// to Lulu's test system, where nothing is printed or charged.
+const PRINT_SHIPPING_CENTS = parseInt(process.env.PRINT_SHIPPING_CENTS, 10) || 499;
+const LULU_SANDBOX = process.env.LULU_SANDBOX === 'true';
+const lulu = createLulu({
+  clientKey: LULU_SANDBOX ? process.env.LULU_SANDBOX_CLIENT_KEY : process.env.LULU_CLIENT_KEY,
+  clientSecret: LULU_SANDBOX ? process.env.LULU_SANDBOX_CLIENT_SECRET : process.env.LULU_CLIENT_SECRET,
+  sandbox: LULU_SANDBOX
+});
+const PRINT_ENABLED = process.env.PRINT_ENABLED === 'true' && lulu.configured;
 // What the charge is called on the customer's card statement. A charge nobody
 // recognises is a chargeback, and this Stripe account is managed under Bluevine
 // and offers no descriptor field in its dashboard, so per-session is the only
@@ -199,6 +217,20 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
           campaign: order.campaign,
           orderId: order.id
         }).catch((err) => console.error('Could not record paid event:', err.message));
+      }
+
+      // A printed copy: keep the address Stripe collected. Caught here, not
+      // answered with a 500 - a retry would not help a bad address, and the
+      // digital book must still start. A failure is emailed instead.
+      if (order) {
+        try {
+          await printOrders.recordPaidSession(session, order);
+        } catch (err) {
+          console.error(`Order ${order.id}: could not record the printed copy -`, err.message);
+          sendAlert({ level: 'ALERT', subject: `Printed copy for order ${order.id} was not recorded`,
+            lines: [`Stripe session ${session.id}: ${err.message}`, 'The digital book is unaffected.'] })
+            .catch(() => {});
+        }
       }
 
       // Start drawing the book on the server, in the background. We deliberately
@@ -944,7 +976,9 @@ async function creatorSales() {
           ? d.promotion_code
           : (d.promotion_code && d.promotion_code.id) || '';
         if (!id) continue;
-        bump(id).revenueCents += session.amount_total || 0;
+        // Book only: printed-copy shipping goes to the printer, not to the sale.
+        bump(id).revenueCents += (session.amount_total || 0)
+          - ((session.total_details && session.total_details.amount_shipping) || 0);
       }
     }
     if (!body.has_more || !body.data.length) break;
@@ -1028,11 +1062,15 @@ app.post('/checkout', async (req, res) => {
     }
 
     const isPrint = product === 'print';
+    if (isPrint && !PRINT_ENABLED) {
+      return res.status(400).json({ error: 'Printed copies are not available yet.' });
+    }
     const isFamily = Array.isArray(order.people) && order.people.length > 1;
-    const base = isFamily ? FAMILY_PRICE_CENTS : PRICE_CENTS;
-    const amount = isPrint ? base + 2000 : base;
+    const amount = isFamily ? FAMILY_PRICE_CENTS : PRICE_CENTS;
+    const shippingCents = isPrint ? PRINT_SHIPPING_CENTS : 0;
     const kind = isFamily ? 'Personalized family coloring book' : 'Personalized coloring book';
-    const label = isPrint ? `${kind} - printed copy` : `${kind} - digital PDF`;
+    const label = isPrint ? `${kind} - digital PDF + free printed copy` : `${kind} - digital PDF`;
+    await db.setOrderProduct(order.id, isPrint ? 'print' : 'digital');
 
     // Stripe's API takes form-encoded bodies, not JSON.
     const form = new URLSearchParams();
@@ -1041,7 +1079,7 @@ app.post('/checkout', async (req, res) => {
     // real value of the sale to the ad pixel. A discount code can make what
     // Stripe actually charges lower than this - the pixel is for measuring
     // which ads produce sales, not for the books, which are Stripe's number.
-    form.append('success_url', `${SITE_URL}?paid=1&order=${order.id}&amt=${(amount / 100).toFixed(2)}`);
+    form.append('success_url', `${SITE_URL}?paid=1&order=${order.id}&amt=${((amount + shippingCents) / 100).toFixed(2)}`);
     form.append('cancel_url', `${SITE_URL}?canceled=1&order=${order.id}`);
     form.append('client_reference_id', String(order.id));
     if (order.email) form.append('customer_email', order.email);
@@ -1051,7 +1089,16 @@ app.post('/checkout', async (req, res) => {
     form.append('line_items[0][price_data][product_data][name]', label);
     form.append('line_items[0][price_data][product_data][description]',
       `${order.pageCount || 15} pages starring ${order.childName}`);
-    if (isPrint) form.append('shipping_address_collection[allowed_countries][0]', 'US');
+    form.append('metadata[product]', isPrint ? 'print' : 'digital');
+    if (isPrint) {
+      // Lulu needs a phone number on every address - the carriers require it.
+      form.append('shipping_address_collection[allowed_countries][0]', 'US');
+      form.append('phone_number_collection[enabled]', 'true');
+      form.append('shipping_options[0][shipping_rate_data][type]', 'fixed_amount');
+      form.append('shipping_options[0][shipping_rate_data][fixed_amount][amount]', String(PRINT_SHIPPING_CENTS));
+      form.append('shipping_options[0][shipping_rate_data][fixed_amount][currency]', 'usd');
+      form.append('shipping_options[0][shipping_rate_data][display_name]', 'Printed copy - shipping & handling (US mail)');
+    }
 
     // Creator codes. The codes live in the Stripe dashboard, one per creator,
     // and the code on the session IS the attribution - Stripe reports sales per
@@ -1162,8 +1209,8 @@ app.post('/checkout', async (req, res) => {
       return res.status(502).json({ error: 'Could not start checkout.', detail: msg });
     }
 
-    await db.attachCheckoutSession(order.id, session.id, amount);
-    res.json({ url: session.url, amountCents: amount });
+    await db.attachCheckoutSession(order.id, session.id, amount + shippingCents);
+    res.json({ url: session.url, amountCents: amount + shippingCents });
   } catch (err) {
     console.error('Checkout failed:', err);
     res.status(500).json({ error: 'Could not start checkout.' });
@@ -2257,6 +2304,13 @@ async function renderBook(orderId) {
         console.error(`Order ${orderId}: could not email - ${mailErr.message}`);
       }
     }
+
+    // A printed copy goes to Lulu once every page exists. Not awaited - the
+    // cover is coloured and the print files built in the background.
+    if (done >= total && PRINT_ENABLED) {
+      printOrders.prepareAndSend(orderId).catch((err) =>
+        console.error(`Order ${orderId}: printed copy step crashed -`, err.message));
+    }
   } catch (err) {
     console.error(`Order ${orderId}: render failed - ${err.message}`);
     try { await db.setGenerationStatus(orderId, 'failed'); } catch (e) {}
@@ -2351,6 +2405,8 @@ app.get('/options', (req, res) => {
     },
     freePreviewPages: FREE_PREVIEW_PAGES,
     priceCents: PRICE_CENTS,
+    // The printed-copy option. The site shows it only when enabled.
+    print: { enabled: PRINT_ENABLED, shippingCents: PRINT_SHIPPING_CENTS },
     family: {
       maxPeople: MAX_PEOPLE,
       // Two or more people, each with their own photo, is what makes a book a
@@ -2965,6 +3021,113 @@ async function sendAlert({ level, subject, lines }) {
 }
 
 // ---------------------------------------------------------------------------
+// Printed copies (print-orders.js, print-pdf.js, lulu.js).
+// ---------------------------------------------------------------------------
+const COLOR_COVER_PROMPT = 'Color in this coloring book page with clean, vivid, professional flat coloring '
+  + 'and soft shading, as a finished example of the page. Keep every black outline exactly where it is: '
+  + 'the same drawing, the same composition, the same face and pose, nothing added, nothing removed, '
+  + 'no text. Warm, friendly colors; a white background stays light.';
+
+// The cover's coloured half: the book's first drawing, coloured in by the same
+// image model that drew it. Measured on a real page, the outlines come back
+// where they were to within a pixel or two, so the two halves meet cleanly.
+async function colorizePage(image) {
+  await waitForImageSlot(true);
+  if (!CAN_CALL_OPENAI) throw new Error('Server is missing its OpenAI API key.');
+  const raw = dataUrlToBuffer(image);
+  const form = new FormData();
+  form.append('model', 'gpt-image-2');
+  form.append('prompt', COLOR_COVER_PROMPT);
+  form.append('size', '1024x1024');
+  form.append('quality', 'medium');
+  form.append('image', new Blob([raw.buffer], { type: raw.mimetype || 'image/png' }), 'page.png');
+  const response = await fetch('https://api.openai.com/v1/images/edits', {
+    method: 'POST',
+    headers: OPENAI_API_KEY ? { Authorization: `Bearer ${OPENAI_API_KEY}` } : {},
+    body: form
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error((data.error && data.error.message) || 'Unknown error from OpenAI.');
+  const b64 = data.data && data.data[0] && data.data[0].b64_json;
+  if (!b64) throw new Error('No image returned from OpenAI.');
+  return `data:image/png;base64,${b64}`;
+}
+
+const printOrders = createPrintOrders({
+  db, lulu, mailer,
+  colorize: colorizePage,
+  alert: sendAlert,
+  filesBaseUrl: process.env.PUBLIC_API_URL || 'https://api.crayonauts.com',
+  contactEmail: process.env.PRINT_CONTACT_EMAIL || ALERT_EMAIL || 'accounts@crayonauts.com',
+  holdBelowCents: parseInt(process.env.PRINT_HOLD_BELOW_CENTS, 10) || 1000
+});
+
+// Where Lulu downloads the book from. The token in the path is the only key.
+app.get('/print-files/:orderId/:token/:file', async (req, res) => {
+  const m = /^(interior|cover)\.pdf$/.exec(req.params.file || '');
+  if (!m) return res.status(404).send('Not found.');
+  try {
+    const buf = await printOrders.getFile(req.params.orderId, req.params.token, m[1]);
+    if (!buf) return res.status(404).send('Not found.');
+    res.set('Content-Type', 'application/pdf');
+    res.set('Cache-Control', 'no-store');
+    res.send(buf);
+  } catch (err) {
+    console.error(`Print file ${req.params.orderId}/${m[1]} failed:`, err.message);
+    res.status(500).send('Could not build the file.');
+  }
+});
+
+// Admin: the printed copies and where each one is. No addresses in the list.
+app.get('/admin/print', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const rows = await db.listPrintOrders();
+    res.json({
+      enabled: PRINT_ENABLED, sandbox: LULU_SANDBOX,
+      orders: rows.map((r) => ({
+        orderId: r.orderId, status: r.status, luluJobId: r.luluJobId, luluStatus: r.luluStatus,
+        trackingUrl: r.trackingUrl, lastError: r.lastError, attempts: r.attempts,
+        city: r.ship && r.ship.city, state: r.ship && r.ship.state_code, updatedAt: r.updatedAt
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: print a held (or failed) copy anyway.
+app.post('/admin/print/:orderId/release', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const row = await printOrders.release(req.params.orderId);
+    if (!row) return res.status(404).json({ error: 'No printed copy for that order.' });
+    if (row.status === 'waiting' && PRINT_ENABLED) {
+      printOrders.prepareAndSend(row.orderId).catch((err) =>
+        console.error(`Order ${row.orderId}: printed copy step crashed -`, err.message));
+    }
+    res.json({ orderId: row.orderId, status: row.status, lastError: row.lastError });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// The print sweep rides the heartbeat, at most every PRINT_SWEEP_MINUTES. The
+// heartbeat's idle cadence is the same half hour, so this never wakes the
+// database on its own.
+const PRINT_SWEEP_MS = (parseInt(process.env.PRINT_SWEEP_MINUTES, 10) || 30) * 60 * 1000;
+let lastPrintSweepAt = 0;
+async function maybeSweepPrints() {
+  if (!PRINT_ENABLED || Date.now() - lastPrintSweepAt < PRINT_SWEEP_MS) return;
+  lastPrintSweepAt = Date.now();
+  try {
+    await printOrders.sweep();
+  } catch (err) {
+    console.error('Print sweep failed:', err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The Saturday payout report, emailed.
 //
 // This used to be a scheduled task on Jonathan's computer, because that is
@@ -3463,6 +3626,7 @@ async function heartbeat() {
   try {
     await resumeUnfinished();
     await rescueFailedPreviews();
+    await maybeSweepPrints();
     // While busy the sweep runs every minute, but the watchdog has nothing new
     // to say that often. When idle they share the one wake.
     const due = Date.now() - lastWatchdogAt >= WATCHDOG_MINUTES * 60 * 1000;
@@ -3501,6 +3665,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, inviteToTrustpilot, supportBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };

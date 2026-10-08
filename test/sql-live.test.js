@@ -51,6 +51,10 @@ async function accepts(label, run) {
     () => db.rescuablePreviews(3, [1, 4, 10]));
   await accepts('the same query with the delays as strings, which is how env vars arrive',
     () => db.rescuablePreviews('3', ['1', '4', '10']));
+  await accepts('printed copies waiting or sent',
+    () => db.listPrintOrders(['waiting', 'preparing', 'sent']));
+  await accepts('one printed copy',
+    () => db.getPrintOrder(1));
   await accepts('unfinished paid orders',
     () => db.resumableOrders(5, 2));
   await accepts('the creator list',

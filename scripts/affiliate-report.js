@@ -223,7 +223,9 @@ function tally(sessions, byId) {
     // asynchronous payment method can still be unpaid, and counting it would
     // credit somebody for money that never arrived.
     if (s.payment_status !== 'paid') continue;
-    const paid = s.amount_total || 0;
+    // Shipping on a printed copy is passed straight to the printer, so it is
+    // not part of the sale a creator earns on.
+    const paid = (s.amount_total || 0) - ((s.total_details && s.total_details.amount_shipping) || 0);
     const listPrice = s.amount_subtotal || paid;
     const found = attribute(s, byId);
     if (found.kind === 'code') {
