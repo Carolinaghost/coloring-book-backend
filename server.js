@@ -1267,7 +1267,39 @@ async function emailBookReady({ order, pdf, pageCount }) {
   });
   await db.markReadyEmailSent(order.id);
   console.log(`Order ${order.id}: ready-email sent${attachments.length ? ' with the book attached' : ' (link only)'}.`);
+  await inviteToTrustpilot(order);
   return { attached: attachments.length > 0 };
+}
+
+// Trustpilot review invitations (their "BCC" automatic invitations).
+//
+// Every PAID order gets one, the same way, whatever happens after - Trustpilot
+// forbids picking and choosing who is invited. Free-code books (giveaway,
+// creators, OWNER) never do: Trustpilot forbids reviews connected to a freebie,
+// and a free book is one. The copy goes only to Trustpilot's address (the To:
+// line names the customer, which is how Trustpilot knows whom to invite), so the
+// customer gets no extra email from us; Trustpilot sends the invite itself
+// after the delay set in their dashboard. A failure here never touches the order.
+const TRUSTPILOT_BCC = process.env.TRUSTPILOT_BCC || '';
+async function inviteToTrustpilot(order) {
+  if (!TRUSTPILOT_BCC || !mailer.configured || !order.email) return false;
+  if (!(Number(order.amountCents) > 0)) return false;
+  try {
+    const name = String(order.childName || '').trim();
+    const text = 'Thank you for your Crayonauts order ' + order.id
+      + (name ? ' (' + name + "'s coloring book)" : '') + '.';
+    await mailer.sendMail({
+      to: order.email, envelopeTo: TRUSTPILOT_BCC,
+      subject: 'Your Crayonauts order ' + order.id,
+      text, html: mailer.plainEmail(text).html,
+      headers: ['X-Order-Reference: ' + order.id]
+    });
+    console.log(`Order ${order.id}: Trustpilot invitation queued.`);
+    return true;
+  } catch (err) {
+    console.error(`Order ${order.id}: Trustpilot invitation failed -`, err.message);
+    return false;
+  }
 }
 
 // The finished book as one file. Same PDF the email carries, so a customer who
@@ -3469,6 +3501,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, supportBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, inviteToTrustpilot, supportBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
