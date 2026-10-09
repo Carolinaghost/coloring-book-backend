@@ -352,6 +352,30 @@ const CREATE_BOT_SQL = `
   );
 `;
 
+// Printed copies. One row per order that asked for one: where it goes, the
+// coloured cover picture made for it, and where Lulu has got to with it.
+// ship is JSON (name, address, phone, email) because it is only ever read
+// whole, to hand to Lulu. files_token guards the two PDF links Lulu downloads
+// the book from.
+const CREATE_PRINT_SQL = `
+  CREATE TABLE IF NOT EXISTS print_orders (
+    order_id         INTEGER     PRIMARY KEY,
+    status           TEXT        NOT NULL DEFAULT 'waiting',
+    ship             TEXT        NOT NULL DEFAULT '{}',
+    shipping_cents   INTEGER     NOT NULL DEFAULT 0,
+    cover_color      TEXT,
+    files_token      TEXT        NOT NULL DEFAULT '',
+    lulu_job_id      TEXT        NOT NULL DEFAULT '',
+    lulu_status      TEXT        NOT NULL DEFAULT '',
+    tracking_url     TEXT        NOT NULL DEFAULT '',
+    last_error       TEXT        NOT NULL DEFAULT '',
+    attempts         INTEGER     NOT NULL DEFAULT 0,
+    shipped_email_at TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`;
+
 async function initDb(attempt = 1) {
   if (!usingPostgres) {
     console.warn(
@@ -373,6 +397,7 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_CREATOR_PAYOUTS_SQL);
     await pool.query(CREATE_GIVEAWAY_SQL);
     await pool.query(CREATE_BOT_SQL);
+    await pool.query(CREATE_PRINT_SQL);
     ready = true;
     lastError = null;
     console.log('Connected to Postgres. Orders table is ready.');
@@ -991,6 +1016,13 @@ async function purgeOldOrders(days) {
     // not what the privacy policy promises, and it would grow forever.
     await client.query(
       'DELETE FROM order_pdfs WHERE order_id IN ('
+      + '  SELECT id FROM orders WHERE submitted_at < NOW() - ($1 * INTERVAL \'1 day\')'
+      + ')',
+      [cutoffDays]);
+    // A printed copy's address and coloured cover go with the rest. Lulu's job
+    // number and status stay: they are the record of what was printed.
+    await client.query(
+      "UPDATE print_orders SET ship = '{}', cover_color = NULL, files_token = '' WHERE order_id IN ("
       + '  SELECT id FROM orders WHERE submitted_at < NOW() - ($1 * INTERVAL \'1 day\')'
       + ')',
       [cutoffDays]);
@@ -1845,7 +1877,118 @@ async function setBotState(key, value) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Printed copies
+// ---------------------------------------------------------------------------
+const memoryPrintOrders = new Map();
+const PRINT_FIELDS = {
+  status: 'status', ship: 'ship', shippingCents: 'shipping_cents', coverColor: 'cover_color',
+  filesToken: 'files_token', luluJobId: 'lulu_job_id', luluStatus: 'lulu_status',
+  trackingUrl: 'tracking_url', lastError: 'last_error', attempts: 'attempts',
+  shippedEmailAt: 'shipped_email_at'
+};
+
+function rowToPrintOrder(row) {
+  let ship = {};
+  try { ship = JSON.parse(row.ship || '{}'); } catch (e) { ship = {}; }
+  return {
+    orderId: row.order_id,
+    status: row.status,
+    ship,
+    shippingCents: row.shipping_cents || 0,
+    coverColor: row.cover_color || null,
+    filesToken: row.files_token || '',
+    luluJobId: row.lulu_job_id || '',
+    luluStatus: row.lulu_status || '',
+    trackingUrl: row.tracking_url || '',
+    lastError: row.last_error || '',
+    attempts: row.attempts || 0,
+    shippedEmailAt: row.shipped_email_at ? new Date(row.shipped_email_at).toISOString() : null,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString()
+  };
+}
+
+// First write wins: Stripe retries webhooks, and a retry must not reset a
+// copy that is already on its way to Lulu.
+async function savePrintOrder({ orderId, ship, shippingCents, status, filesToken }) {
+  const id = Number(orderId);
+  const shipText = JSON.stringify(ship || {});
+  if (!usingPostgres) {
+    if (!memoryPrintOrders.has(id)) {
+      const t = new Date().toISOString();
+      memoryPrintOrders.set(id, {
+        order_id: id, status: status || 'waiting', ship: shipText, shipping_cents: shippingCents || 0,
+        cover_color: null, files_token: filesToken || '', lulu_job_id: '', lulu_status: '',
+        tracking_url: '', last_error: '', attempts: 0, shipped_email_at: null, created_at: t, updated_at: t
+      });
+    }
+    return rowToPrintOrder(memoryPrintOrders.get(id));
+  }
+  await pool.query(
+    `INSERT INTO print_orders (order_id, status, ship, shipping_cents, files_token)
+     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (order_id) DO NOTHING`,
+    [id, status || 'waiting', shipText, Number(shippingCents) || 0, filesToken || '']);
+  return getPrintOrder(id);
+}
+
+async function getPrintOrder(orderId) {
+  const id = Number(orderId);
+  if (!usingPostgres) return memoryPrintOrders.has(id) ? rowToPrintOrder(memoryPrintOrders.get(id)) : null;
+  const { rows } = await pool.query('SELECT * FROM print_orders WHERE order_id = $1', [id]);
+  return rows[0] ? rowToPrintOrder(rows[0]) : null;
+}
+
+async function updatePrintOrder(orderId, fields) {
+  const id = Number(orderId);
+  const entries = Object.entries(fields || {}).filter(([k]) => PRINT_FIELDS[k]);
+  if (!entries.length) return getPrintOrder(id);
+  const toDb = (k, v) => (k === 'ship' ? JSON.stringify(v || {}) : v);
+  if (!usingPostgres) {
+    const row = memoryPrintOrders.get(id);
+    if (!row) return null;
+    for (const [k, v] of entries) row[PRINT_FIELDS[k]] = toDb(k, v);
+    row.updated_at = new Date().toISOString();
+    return rowToPrintOrder(row);
+  }
+  const sets = entries.map(([k], i) => `${PRINT_FIELDS[k]} = $${i + 2}`);
+  const { rows } = await pool.query(
+    `UPDATE print_orders SET ${sets.join(', ')}, updated_at = NOW() WHERE order_id = $1 RETURNING *`,
+    [id, ...entries.map(([k, v]) => toDb(k, v))]);
+  return rows[0] ? rowToPrintOrder(rows[0]) : null;
+}
+
+async function listPrintOrders(statuses) {
+  const want = Array.isArray(statuses) ? statuses : null;
+  if (!usingPostgres) {
+    return [...memoryPrintOrders.values()].map(rowToPrintOrder)
+      .filter((p) => !want || want.includes(p.status))
+      .sort((a, b) => a.orderId - b.orderId);
+  }
+  const { rows } = want
+    ? await pool.query('SELECT * FROM print_orders WHERE status = ANY($1) ORDER BY order_id', [want])
+    : await pool.query('SELECT * FROM print_orders ORDER BY order_id');
+  return rows.map(rowToPrintOrder);
+}
+
+// Which product the customer chose at checkout ('digital' or 'print').
+async function setOrderProduct(orderId, product) {
+  const id = Number(orderId);
+  const value = product === 'print' ? 'print' : 'digital';
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === id);
+    if (o) o.product = value;
+    return;
+  }
+  await pool.query('UPDATE orders SET product = $2 WHERE id = $1', [id, value]);
+}
+
 module.exports = {
+  savePrintOrder,
+  getPrintOrder,
+  updatePrintOrder,
+  listPrintOrders,
+  setOrderProduct,
   countGiveawayClaims,
   getGiveawayClaim,
   saveGiveawayClaim,
