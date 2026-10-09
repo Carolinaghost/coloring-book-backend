@@ -2120,7 +2120,18 @@ async function maybeMirror(b64) {
 // One scene. Takes either a single photo (buffer/mimetype/filename) or, for a
 // family book, a photos array of those same three fields - one entry per
 // person, in the order the prompt names them.
-async function renderScene({ buffer, mimetype, filename, photos, prompt, paid }) {
+// The free preview draws at a lower quality setting because it is the wait a
+// visitor sits through before deciding. Timed on 9 Oct 2026 with the real
+// prompt and four sample photos: 'low' 11.7-14.2s a page against 'medium'
+// 33.9-44.9s. The lines come out bolder and simpler, still a clear likeness,
+// which reads fine as a coloring page. Paid pages stay on 'medium'.
+// PREVIEW_QUALITY=medium on Render puts the preview back without a deploy.
+const PREVIEW_QUALITY = ['low', 'medium', 'high'].includes(process.env.PREVIEW_QUALITY)
+  ? process.env.PREVIEW_QUALITY : 'low';
+const PAID_QUALITY = ['low', 'medium', 'high'].includes(process.env.PAID_QUALITY)
+  ? process.env.PAID_QUALITY : 'medium';
+
+async function renderScene({ buffer, mimetype, filename, photos, prompt, paid, quality }) {
   await waitForImageSlot(paid === true);
   if (!CAN_CALL_OPENAI) throw new Error('Server is missing its OpenAI API key.');
 
@@ -2133,7 +2144,7 @@ async function renderScene({ buffer, mimetype, filename, photos, prompt, paid })
   form.append('model', 'gpt-image-2');
   form.append('prompt', prompt);
   form.append('size', '1024x1024');
-  form.append('quality', 'medium');
+  form.append('quality', quality || PAID_QUALITY);
   // A single photo keeps the field name it has always had. Several go as
   // image[], which the images API accepts and matches to the order the prompt
   // introduces people in.
@@ -2672,7 +2683,7 @@ app.post('/style-preview', upload.fields([
       const prompt = buildPrompt(tile.theme, tile.sceneIndex, childCount,
         audience === 'adult' ? 'adult' : 'kid', '', cast, DEFAULT_DETAIL);
       try {
-        const image = await renderScene({ photos: references, prompt, paid: false });
+        const image = await renderScene({ photos: references, prompt, paid: false, quality: PREVIEW_QUALITY });
         return { theme: tile.theme, label: tile.label, image };
       } catch (err) {
         console.error(`Style preview (${tile.theme}) failed -`, err.message);
@@ -2795,7 +2806,8 @@ app.post('/convert', upload.fields([
         mimetype: file.mimetype,
         filename: file.originalname || `photo-${i + 1}.png`
       }));
-      image = await renderScene({ photos: references, prompt, paid: paidOrder !== null });
+      image = await renderScene({ photos: references, prompt, paid: paidOrder !== null,
+        quality: paidOrder ? PAID_QUALITY : PREVIEW_QUALITY });
     } catch (renderErr) {
       console.error('OpenAI error:', renderErr.message);
       // No image, so no preview was used. Give it back before answering.
@@ -3542,7 +3554,7 @@ async function rescuePreview(orderId) {
       const prompt = buildPrompt(order.theme, sceneIndex, order.childCount,
         subjectType, order.notes, cast, order.detailLevel);
       try {
-        const image = await renderScene({ photos: references, prompt, paid: false });
+        const image = await renderScene({ photos: references, prompt, paid: false, quality: PREVIEW_QUALITY });
         await db.savePage(orderId, sceneIndex, image);
         drawn.set(sceneIndex, image);
         already.add(sceneIndex);
@@ -3665,6 +3677,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
