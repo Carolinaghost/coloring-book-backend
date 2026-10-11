@@ -3340,6 +3340,22 @@ const supportBot = createSupportBot({
   alertEmail: process.env.SUPPORT_ALERT_EMAIL || ALERT_EMAIL,
   from: process.env.MAIL_FROM || 'support@crayonauts.com'
 });
+// The same assistant on admin@, where creators write after signing up (their
+// welcome email comes from there). It knows the creator program and passes
+// anything about money, fees or contracts to Jonathan. Needs ADMIN_IMAP_PASS
+// (the admin@ Zoho app password); without it only support@ is answered.
+const adminBot = createSupportBot({
+  db, mailer, inbox: 'admin',
+  imap: {
+    host: process.env.SUPPORT_IMAP_HOST || 'imappro.zoho.com',
+    user: process.env.ADMIN_IMAP_USER || 'admin@crayonauts.com',
+    pass: process.env.ADMIN_IMAP_PASS || ''
+  },
+  openaiKey: process.env.OPENAI_API_KEY,
+  model: process.env.SUPPORT_BOT_MODEL || 'gpt-5.4-mini',
+  alertEmail: process.env.SUPPORT_ALERT_EMAIL || ALERT_EMAIL,
+  from: 'admin@crayonauts.com'
+});
 const SUPPORT_BOT_ON = process.env.SUPPORT_BOT_ENABLED === 'true';
 
 // Once a day, around 9am Eastern: review asks for giveaway claims, then one
@@ -3376,14 +3392,15 @@ async function runAssistantDay() {
 }
 
 if (process.env.NODE_ENV !== 'test') {
-  if (SUPPORT_BOT_ON && supportBot.configured) {
-    console.log('Support assistant is on.');
-    setInterval(() => {
-      supportBot.pollOnce().catch((err) => console.error('Support assistant check failed:', err.message));
-    }, 5 * 60 * 1000).unref();
-    setTimeout(() => supportBot.pollOnce().catch((err) => console.error('Support assistant check failed:', err.message)), 30 * 1000).unref();
-  } else {
-    console.log('Support assistant is off' + (SUPPORT_BOT_ON ? ' (missing SUPPORT_IMAP_PASS, OPENAI_API_KEY or mail settings).' : '.'));
+  for (const [name, bot] of [['support@', supportBot], ['admin@', adminBot]]) {
+    if (SUPPORT_BOT_ON && bot.configured) {
+      console.log(`Email assistant is on for ${name}.`);
+      const check = () => bot.pollOnce().catch((err) => console.error(`Email assistant (${name}) check failed:`, err.message));
+      setInterval(check, 5 * 60 * 1000).unref();
+      setTimeout(check, (name === 'admin@' ? 60 : 30) * 1000).unref();
+    } else {
+      console.log(`Email assistant is off for ${name}` + (SUPPORT_BOT_ON ? ' (missing its IMAP password, OPENAI_API_KEY or mail settings).' : '.'));
+    }
   }
   setInterval(async () => {
     const now = new Date();
@@ -3677,6 +3694,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
