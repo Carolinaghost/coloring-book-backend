@@ -126,6 +126,33 @@ function fakeImap(box) {
   r = await bot3.pollOnce();
   check('next check retries and answers', r.results[0] && r.results[0].outcome === 'replied' && sent.some((m) => m.to === 'rae@example.com'));
 
+  // --- the same assistant on admin@ (creators)
+  const { buildSystem, SYSTEM } = require('../support-bot');
+  check('support@ prompt knows about the printed copy', /Printed copy/.test(SYSTEM) && !/do not sell printed/i.test(SYSTEM));
+  check('support@ prompt has no creator payout rules', !/Pay week/.test(SYSTEM));
+  const adminSystem = buildSystem('admin');
+  check('admin@ prompt is for the admin@ inbox and knows payouts', /admin@crayonauts\.com inbox/.test(adminSystem) && /Pay week/.test(adminSystem) && /Tuesday/.test(adminSystem));
+  check('admin@ prompt escalates fees and money owed', /asking for a fee/.test(adminSystem) && /money they are owed/.test(adminSystem));
+  const boxA = { validity: 3, mail: [] };
+  const systemsSeen = [];
+  const adminFetch = async (url, init) => { const b = JSON.parse(init.body); systemsSeen.push(b.messages[0].content); return fakeFetch(url, init); };
+  const adminBot = createSupportBot({ db, mailer, inbox: 'admin', imap: { user: 'admin@crayonauts.com', pass: 'p' }, openaiKey: 'k',
+    alertEmail: 'owner@example.com', fetchImpl: adminFetch, makeImap: fakeImap(boxA), log: { log() {}, error() {} } });
+  r = await adminBot.pollOnce();
+  check('admin@ starts after what is already there', r.baseline === 0 && JSON.parse(await db.getBotState('admin_inbox')).uidValidity === 3);
+  check('admin@ does not touch support@ place in the inbox', JSON.parse(await db.getBotState('support_inbox')).uidValidity === 9);
+  boxA.mail.push(rawMail({ from: 'Cara <cara@example.com>', subject: 'When do I get paid?', body: 'When are creators paid?', id: '<c1@x>' }));
+  decisions['cara@example.com'] = { action: 'reply', reply: 'Hi Cara, every Tuesday.', summary: 'payout timing' };
+  r = await adminBot.pollOnce();
+  const toCara = sent.find((m) => m.to === 'cara@example.com');
+  check('admin@ answers from admin@', r.results[0].outcome === 'replied' && toCara && toCara.from === 'admin@crayonauts.com');
+  check('admin@ uses the creator prompt', systemsSeen.length === 1 && /Pay week/.test(systemsSeen[0]));
+  boxA.mail.push(rawMail({ from: 'Fee <fee@example.com>', subject: 'Rates', body: 'My rate is $200 per video', id: '<c2@x>' }));
+  decisions['fee@example.com'] = { action: 'escalate', reply: 'Thanks - Jonathan will get back to you within a day.', summary: 'asks for a fee' };
+  r = await adminBot.pollOnce();
+  check('admin@ escalation names admin@ in the alert', r.results[0].outcome === 'escalated'
+    && sent.some((m) => m.to === 'owner@example.com' && /admin@crayonauts\.com needs you/.test(m.text)));
+
   console.log(pass + ' passed' + (failures.length ? ', FAILED: ' + failures.join('; ') : ''));
   process.exit(failures.length ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
