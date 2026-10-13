@@ -305,8 +305,9 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent, freeCode }) {
   ];
   if (freeCode) {
     text.push(
-      'And your free book, on us: use code ' + freeCode + ' at checkout. It works',
-      'once, it never expires, and it takes the price to zero.',
+      'And your free book, on us: choose Digital only, then use code ' + freeCode,
+      'at checkout. It works once, it never expires, and it takes the price to zero.',
+      '(The code covers the digital book, not the printed copy\'s shipping.)',
       ''
     );
   }
@@ -343,8 +344,9 @@ function creatorWelcomeEmail({ name, code, siteUrl, ratePercent, freeCode }) {
     freeCode
       ? '<div style="background:#FBF6EA;border-left:4px solid #E8622C;border-radius:8px;padding:14px 16px;margin:18px 0;">'
         + '<p style="margin:0 0 4px;font-weight:bold;">And your free book, on us.</p>'
-        + '<p style="margin:0;">Use <strong style="letter-spacing:1px;">' + escapeHtml(freeCode)
-        + '</strong> at checkout. It works once, it never expires, and it takes the price to zero.</p>'
+        + '<p style="margin:0;">Choose <strong>Digital only</strong>, then use <strong style="letter-spacing:1px;">' + escapeHtml(freeCode)
+        + '</strong> at checkout. It works once, it never expires, and it takes the price to zero.'
+        + ' (The code covers the digital book, not the printed copy&rsquo;s shipping.)</p>'
         + '</div>'
       : '',
     '<p>Either one works. The link is for your bio; the code is for when somebody is reading your '
@@ -418,6 +420,9 @@ function creatorPayoutSetupEmail({ name, setupUrl }) {
 // matter and does not pretend to be a sanitiser.
 // The free-book giveaway: the code, and how to use it.
 function giveawayCodeEmail({ name, code, siteUrl }) {
+  // ?free=1 makes the order page offer the digital book only, so the code
+  // really does take the total to $0 (it cannot cover printed-copy shipping).
+  const bookUrl = String(siteUrl || '').replace(/\/+$/, '') + '/?free=1';
   const first = String(name || '').trim().split(/\s+/)[0] || 'there';
   const subject = 'Your free Crayonauts book - code ' + code;
   const text = [
@@ -425,9 +430,10 @@ function giveawayCodeEmail({ name, code, siteUrl }) {
     '',
     'Here is your free coloring book code: ' + code,
     '',
-    '1. Go to ' + siteUrl,
+    '1. Go to ' + bookUrl,
     '2. Upload a clear photo of your child facing the camera. You will see 2 pages free.',
-    '3. Press Unlock and type ' + code + ' at checkout. The price goes to $0.',
+    '3. Choose Digital only if asked, press Unlock and type ' + code + ' at checkout.',
+    '   The price goes to $0.',
     '',
     'The code works once. Your book arrives as a printable PDF you can print as many',
     'times as you like.',
@@ -447,9 +453,9 @@ function giveawayCodeEmail({ name, code, siteUrl }) {
     '<p style="margin:0;font-size:24px;font-weight:bold;letter-spacing:1px;">' + escapeHtml(code) + '</p>',
     '</div>',
     '<ol style="padding-left:20px;line-height:1.6;">',
-    '<li>Go to <a href="' + siteUrl + '">' + escapeHtml(siteUrl.replace(/^https?:\/\//, '')) + '</a></li>',
+    '<li>Go to <a href="' + bookUrl + '">' + escapeHtml(siteUrl.replace(/^https?:\/\//, '')) + '</a></li>',
     '<li>Upload a clear photo of your child facing the camera. You&rsquo;ll see 2 pages free.</li>',
-    '<li>Press <strong>Unlock</strong> and type <strong>' + escapeHtml(code) + '</strong> at checkout. The price goes to $0.</li>',
+    '<li>Choose <strong>Digital only</strong> if asked, press <strong>Unlock</strong> and type <strong>' + escapeHtml(code) + '</strong> at checkout. The price goes to $0.</li>',
     '</ol>',
     '<p>The code works once. Your book arrives as a printable PDF you can print as many times as you like.</p>',
     '<p>All we ask in return: once your little one has colored a few pages, leave us an honest review. '
