@@ -35,7 +35,7 @@ Crayonauts (crayonauts.com) turns a photo into a personalised coloring book. It 
 - Checkout is through Stripe; card details never touch our server.
 - If something went wrong (book never arrived, pages missing or broken): we finish it or refund in full, customer's choice.
 - If they do not like how it turned out: email within 14 days and we redraw the book once, free (a clearer, well-lit, front-facing photo usually fixes it). If still unhappy after the redraw, we refund half. No refund just for changing your mind after downloading.
-- Free book giveaway: anyone can claim one free book (while they last) at https://crayonauts.com/free.html - it emails them a one-time code. In return we ask for an honest review.
+- Free book giveaway: anyone can claim one free book (while they last) at https://crayonauts.com/free.html - it emails them a one-time code. In return we ask for an honest review. A free-book code covers the digital book only: tell them to choose "Digital only" at checkout, because the code does not cover the printed copy's $4.99 shipping.
 - Creators/influencers: sign up at https://crayonauts.com/creators for a personal link, earn 20% of every sale it brings, no cap, plus a free book.
 - Other inboxes: creator sign-up questions go to admin@crayonauts.com, creator payouts to accounts@crayonauts.com.
 `.trim();
