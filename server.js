@@ -883,6 +883,55 @@ async function sendCreatorWelcome(creator, free) {
 // Nothing here logs the token or the URL that carries it, and a bad token gets
 // the same flat answer as a missing one so the page is no use for guessing.
 const PAYOUT_LINK_INVALID = "This link isn't valid. Email accounts@crayonauts.com and we'll send you a new one.";
+// ---------------------------------------------------------------------------
+// Text message (SMS) opt-in, from crayonauts.com/sms.html and the order page.
+// Only stores the consent - nothing sends texts yet. The wording saved with
+// each opt-in is built here, not taken from the browser, so the record says
+// exactly what the page showed. Keep it in step with sms.html, index.html and
+// the "Text messages" sections of legal.html.
+const SMS_SIGNUPS_PER_IP = Number(process.env.SMS_SIGNUPS_PER_IP || 5);
+const SMS_CONSENT_VERSION = '2026-10-23';
+
+function smsConsentText({ orderUpdates, promos }) {
+  const kinds = [];
+  if (orderUpdates) kinds.push('order updates');
+  if (promos) kinds.push('promotional messages (offers and new themes)');
+  return '[' + SMS_CONSENT_VERSION + '] I agree to receive ' + kinds.join(' and ')
+    + ' by text message from Crayonauts at this number. Consent is not a condition'
+    + ' of purchase. Message frequency varies. Message and data rates may apply.'
+    + ' Reply STOP to opt out, HELP for help. Terms: https://crayonauts.com/legal.html#sms-terms'
+    + ' Privacy: https://crayonauts.com/legal.html#sms-privacy';
+}
+
+// US numbers only, stored as +1XXXXXXXXXX. Returns '' for anything else.
+function normalizeUsPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 11 && d[0] === '1') d = d.slice(1);
+  if (d.length !== 10 || d[0] < '2' || d[3] < '2') return '';
+  return '+1' + d;
+}
+
+app.post('/sms/optin', async (req, res) => {
+  const phone = normalizeUsPhone(req.body.phone);
+  const orderUpdates = req.body.orderUpdates === true;
+  const promos = req.body.promos === true;
+  const source = String(req.body.source || '').trim().slice(0, 40);
+  if (!phone) return res.status(400).json({ error: 'Enter a US mobile number, like (555) 123-4567.' });
+  if (!orderUpdates && !promos) return res.status(400).json({ error: 'Tick at least one box to choose which texts you want.' });
+  try {
+    const quota = await db.takeSignupQuota('sms|' + clientIp(req), previewDay(), SMS_SIGNUPS_PER_IP);
+    if (!quota.allowed) {
+      return res.status(429).json({ error: 'That is enough sign-ups from here today. Email support@crayonauts.com.' });
+    }
+    await db.saveSmsOptin({ phone, orderUpdates, promos, consentText: smsConsentText({ orderUpdates, promos }), source });
+    console.log('SMS: opt-in saved' + (source ? ' (from ' + source + ')' : '') + '.');
+    res.json({ ok: true, orderUpdates, promos });
+  } catch (err) {
+    console.error('SMS opt-in failed:', err.message);
+    res.status(503).json({ error: 'Could not save that just now. Try again in a minute.' });
+  }
+});
+
 app.get('/creators/payout-setup/:token', async (req, res) => {
   let creator;
   try {
@@ -3694,6 +3743,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, normalizeUsPhone, smsConsentText, SMS_SIGNUPS_PER_IP, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
