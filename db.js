@@ -376,6 +376,23 @@ const CREATE_PRINT_SQL = `
   );
 `;
 
+// Text message (SMS) opt-ins, from crayonauts.com/sms.html and the order page.
+// One row per phone number (E.164, e.g. +15551234567). Which kinds of text the
+// person agreed to, the exact consent wording they were shown, where they
+// signed up and when are kept as the record of consent carriers ask for.
+// opted_out_at is set when they reply STOP; signing up again clears it.
+const CREATE_SMS_SQL = `
+  CREATE TABLE IF NOT EXISTS sms_optins (
+    phone         TEXT        PRIMARY KEY,
+    order_updates BOOLEAN     NOT NULL DEFAULT FALSE,
+    promos        BOOLEAN     NOT NULL DEFAULT FALSE,
+    consent_text  TEXT        NOT NULL DEFAULT '',
+    source        TEXT        NOT NULL DEFAULT '',
+    opted_in_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    opted_out_at  TIMESTAMPTZ
+  );
+`;
+
 async function initDb(attempt = 1) {
   if (!usingPostgres) {
     console.warn(
@@ -398,6 +415,7 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_GIVEAWAY_SQL);
     await pool.query(CREATE_BOT_SQL);
     await pool.query(CREATE_PRINT_SQL);
+    await pool.query(CREATE_SMS_SQL);
     ready = true;
     lastError = null;
     console.log('Connected to Postgres. Orders table is ready.');
@@ -1983,7 +2001,54 @@ async function setOrderProduct(orderId, product) {
   await pool.query('UPDATE orders SET product = $2 WHERE id = $1', [id, value]);
 }
 
+
+// ---------------------------------------------------------------------------
+// SMS opt-ins (see CREATE_SMS_SQL above).
+
+const memorySms = new Map();
+
+function rowToSms(r) {
+  if (!r) return null;
+  return {
+    phone: r.phone, orderUpdates: !!r.order_updates, promos: !!r.promos,
+    consentText: r.consent_text || '', source: r.source || '',
+    optedInAt: r.opted_in_at, optedOutAt: r.opted_out_at || null
+  };
+}
+
+// Signing up again replaces the earlier choices and clears any opt-out: the
+// newest consent is the one that counts.
+async function saveSmsOptin({ phone, orderUpdates, promos, consentText, source }) {
+  const row = {
+    phone: String(phone), order_updates: !!orderUpdates, promos: !!promos,
+    consent_text: String(consentText || '').slice(0, 2000), source: String(source || '').slice(0, 40)
+  };
+  if (!usingPostgres) {
+    const saved = { ...row, opted_in_at: new Date(), opted_out_at: null };
+    memorySms.set(row.phone, saved);
+    return rowToSms(saved);
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO sms_optins (phone, order_updates, promos, consent_text, source)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (phone) DO UPDATE SET order_updates = EXCLUDED.order_updates,
+       promos = EXCLUDED.promos, consent_text = EXCLUDED.consent_text,
+       source = EXCLUDED.source, opted_in_at = NOW(), opted_out_at = NULL
+     RETURNING *`,
+    [row.phone, row.order_updates, row.promos, row.consent_text, row.source]
+  );
+  return rowToSms(rows[0]);
+}
+
+async function getSmsOptin(phone) {
+  if (!usingPostgres) return rowToSms(memorySms.get(String(phone)));
+  const { rows } = await pool.query('SELECT * FROM sms_optins WHERE phone = $1', [String(phone)]);
+  return rowToSms(rows[0]);
+}
+
 module.exports = {
+  saveSmsOptin,
+  getSmsOptin,
   savePrintOrder,
   getPrintOrder,
   updatePrintOrder,
