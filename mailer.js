@@ -422,7 +422,10 @@ function creatorPayoutSetupEmail({ name, setupUrl }) {
 function giveawayCodeEmail({ name, code, siteUrl }) {
   // ?free=1 makes the order page offer the digital book only, so the code
   // really does take the total to $0 (it cannot cover printed-copy shipping).
-  const bookUrl = String(siteUrl || '').replace(/\/+$/, '') + '/?free=1';
+  // &c= puts the code on the order itself, so nothing has to be typed. It also
+  // matters when the visitor first came through a creator or ad link: then the
+  // site attaches that link's code and Stripe shows no box to type one in.
+  const bookUrl = String(siteUrl || '').replace(/\/+$/, '') + '/?free=1&c=' + encodeURIComponent(code);
   const first = String(name || '').trim().split(/\s+/)[0] || 'there';
   const subject = 'Your free Crayonauts book - code ' + code;
   const text = [
@@ -432,8 +435,9 @@ function giveawayCodeEmail({ name, code, siteUrl }) {
     '',
     '1. Go to ' + bookUrl,
     '2. Upload a clear photo of your child facing the camera. You will see 2 pages free.',
-    '3. Choose Digital only if asked, press Unlock and type ' + code + ' at checkout.',
-    '   The price goes to $0.',
+    '3. Choose Digital only if asked and press Unlock. The link above already has your',
+    '   code on it, so the price goes to $0. (Came to the site another way? Tap',
+    '   "Have a code?" above Unlock, or type ' + code + ' at checkout.)',
     '',
     'The code works once. Your book arrives as a printable PDF you can print as many',
     'times as you like.',
@@ -455,7 +459,8 @@ function giveawayCodeEmail({ name, code, siteUrl }) {
     '<ol style="padding-left:20px;line-height:1.6;">',
     '<li>Go to <a href="' + bookUrl + '">' + escapeHtml(siteUrl.replace(/^https?:\/\//, '')) + '</a></li>',
     '<li>Upload a clear photo of your child facing the camera. You&rsquo;ll see 2 pages free.</li>',
-    '<li>Choose <strong>Digital only</strong> if asked, press <strong>Unlock</strong> and type <strong>' + escapeHtml(code) + '</strong> at checkout. The price goes to $0.</li>',
+    '<li>Choose <strong>Digital only</strong> if asked and press <strong>Unlock</strong>. The link above already has your code on it, so the price goes to $0. '
+    + '(Came to the site another way? Tap <strong>Have a code?</strong> above Unlock, or type <strong>' + escapeHtml(code) + '</strong> at checkout.)</li>',
     '</ol>',
     '<p>The code works once. Your book arrives as a printable PDF you can print as many times as you like.</p>',
     '<p>All we ask in return: once your little one has colored a few pages, leave us an honest review. '
