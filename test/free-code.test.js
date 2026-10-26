@@ -52,6 +52,9 @@ if (process.env.DATABASE_URL && process.env.ALLOW_DB_TESTS !== '1') {
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_not_a_real_key';
 process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_not_a_real_secret';
 process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'sk-test-not-a-real-key';
+// Meta Conversions API switched on, so the test can prove a free book is never
+// reported to Meta as a Purchase.
+process.env.META_CAPI_TOKEN = 'test-token-not-real';
 
 const http = require('http');
 const crypto = require('crypto');
@@ -104,6 +107,10 @@ function stubApis() {
         json: async () => ({ id: SESSION_ID, url: `https://checkout.stripe.test/c/pay/${SESSION_ID}` })
       };
     }
+    if (target.includes('graph.facebook.com')) {
+      metaBodies.push(JSON.parse(opts.body));
+      return { ok: true, json: async () => ({ events_received: 1 }) };
+    }
     if (target.includes('api.openai.com')) {
       images.calls++;
       await images.gate;
@@ -115,6 +122,7 @@ function stubApis() {
   return { images, stripeBodies };
 }
 
+const metaBodies = [];
 const { images, stripeBodies } = stubApis();
 
 const db = require('../db.js');
@@ -249,6 +257,9 @@ async function main() {
   // missing one. Read as missing it fell back to the price quoted at checkout,
   // and every free book counted as a full-price sale in /stats and in the CSV.
   check('a $0 order records $0, not the price we quoted', afterPaid.amountCents, 0);
+  await sleep(50);
+  check('a $0 order is never sent to Meta as a Purchase',
+    metaBodies.filter((b) => b.data.some((e) => e.event_name === 'Purchase')).length, 0);
 
   // The whole point. Marked paid is worth nothing if nobody starts drawing.
   check('the book starts being drawn',

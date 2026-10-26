@@ -18,6 +18,7 @@ const { createSupportBot } = require('./support-bot');
 const { main: affiliateReport, saturdayArgs, DEFAULT_REPORT_RATES } = require('./scripts/affiliate-report.js');
 const neon = require('./neon');
 const textGuard = require('./text-guard');
+const metaCapi = require('./meta-capi');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
@@ -175,6 +176,33 @@ function verifyStripeSignatureAny(rawBody, header, secrets) {
   throw lastErr;
 }
 
+// The server half of the Pixel's Purchase. event_id 'purchase-<order id>' is
+// what index.html gives the browser's Purchase, so Meta de-duplicates them.
+function sendPurchaseToMeta(order, session) {
+  const md = session.metadata || {};
+  const cd = session.customer_details || {};
+  const isFamily = Array.isArray(order.people) && order.people.length > 1;
+  const kind = isFamily ? 'family' : 'personal';
+  return metaCapi.sendEvent({
+    eventName: 'Purchase',
+    eventId: 'purchase-' + order.id,
+    eventTime: (session.created ? session.created * 1000 : Date.now()),
+    sourceUrl: md.fb_url || SITE_URL,
+    email: order.email || cd.email,
+    phone: cd.phone,
+    externalId: order.id,
+    fbp: md.fb_fbp, fbc: md.fb_fbc, ip: md.fb_ip, ua: md.fb_ua,
+    customData: {
+      value: Number(session.amount_total) / 100,
+      currency: 'USD',
+      content_name: order.theme || '',
+      content_type: 'product',
+      content_ids: [kind],
+      contents: [{ id: kind, quantity: 1 }]
+    }
+  }).catch(() => null);
+}
+
 // Mounted before express.json() on purpose — signature verification needs the
 // exact bytes Stripe sent, not a re-serialised object.
 app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
@@ -241,6 +269,12 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
         renderBook(order.id).catch((err) =>
           console.error(`Order ${order.id}: background render crashed -`, err.message));
       }
+
+      // Meta Conversions API. Paid sales only: a free-code book is never
+      // reported as a Purchase, so Meta does not learn to find free claims.
+      // The event id matches the one the browser's Pixel uses, so Meta keeps
+      // one copy. Not awaited - Stripe is waiting on this reply.
+      if (order && Number(session.amount_total) > 0) sendPurchaseToMeta(order, session);
     }
     if (event.type === 'account.updated') {
       // A creator finished Stripe's onboarding, or Stripe changed its mind
@@ -817,6 +851,14 @@ app.post('/giveaway/claim', async (req, res) => {
     if (!claim) claim = await db.getGiveawayClaim(email);
     res.json({ code: claim.code, again: false });
     console.log('Giveaway: free book code claimed' + (source ? ' (from ' + source + ')' : '') + '.');
+    // A free claim is a Lead to Meta, never a Purchase.
+    const fbLead = metaCapi.browserDetails({ fb: req.body.fb, ip: clientIp(req), userAgent: req.headers['user-agent'] });
+    metaCapi.sendEvent({
+      eventName: 'Lead', eventId: 'lead-' + claim.code,
+      sourceUrl: fbLead.url || (SITE_URL.replace(/\/+$/, '') + '/free.html'),
+      email, fbp: fbLead.fbp, fbc: fbLead.fbc, ip: fbLead.ip, ua: fbLead.ua,
+      customData: { content_name: 'free book giveaway' }
+    }).catch(() => null);
     await sendGiveawayEmail(claim);
   } catch (err) {
     console.error('Giveaway claim failed:', err.message);
@@ -1139,6 +1181,15 @@ app.post('/checkout', async (req, res) => {
     form.append('line_items[0][price_data][product_data][description]',
       `${order.pageCount || 15} pages starring ${order.childName}`);
     form.append('metadata[product]', isPrint ? 'print' : 'digital');
+    // Kept on the session so the Purchase sent from the webhook can be matched
+    // to the ad click: Meta's cookie ids, the IP address and the browser, plus
+    // the page. The webhook has none of these itself.
+    const fbDetails = metaCapi.browserDetails({ fb: body.fb, ip: clientIp(req), userAgent: req.headers['user-agent'] });
+    if (fbDetails.fbp) form.append('metadata[fb_fbp]', fbDetails.fbp);
+    if (fbDetails.fbc) form.append('metadata[fb_fbc]', fbDetails.fbc);
+    if (fbDetails.ip) form.append('metadata[fb_ip]', fbDetails.ip);
+    if (fbDetails.ua) form.append('metadata[fb_ua]', fbDetails.ua);
+    if (fbDetails.url) form.append('metadata[fb_url]', fbDetails.url);
     if (isPrint) {
       // Lulu needs a phone number on every address - the carriers require it.
       form.append('shipping_address_collection[allowed_countries][0]', 'US');
@@ -1260,6 +1311,19 @@ app.post('/checkout', async (req, res) => {
 
     await db.attachCheckoutSession(order.id, session.id, amount + shippingCents);
     res.json({ url: session.url, amountCents: amount + shippingCents });
+
+    // The server copy of the Pixel's InitiateCheckout, same id as the browser's.
+    const icId = body.fb && typeof body.fb.icId === 'string' && /^ic-[a-z0-9-]{6,60}$/.test(body.fb.icId) ? body.fb.icId : '';
+    if (icId) {
+      metaCapi.sendEvent({
+        eventName: 'InitiateCheckout', eventId: icId,
+        sourceUrl: fbDetails.url || SITE_URL,
+        email: order.email, externalId: order.id,
+        fbp: fbDetails.fbp, fbc: fbDetails.fbc, ip: fbDetails.ip, ua: fbDetails.ua,
+        customData: { value: (amount + shippingCents) / 100, currency: 'USD', content_type: 'product',
+          content_ids: [isFamily ? 'family' : 'personal'] }
+      }).catch(() => null);
+    }
   } catch (err) {
     console.error('Checkout failed:', err);
     res.status(500).json({ error: 'Could not start checkout.' });
@@ -1294,7 +1358,11 @@ app.get('/orders/:id/access', async (req, res) => {
       pageCount: order.pageCount,
       generationStatus: order.generationStatus,
       pagesReady: await db.countPages(order.id),
-      freePreviewPages: FREE_PREVIEW_PAGES
+      freePreviewPages: FREE_PREVIEW_PAGES,
+      // What Stripe actually charged, once paid (0 for a free-code book). The
+      // return page reports this to the Pixel, not the list price in its URL.
+      amountCents: order.paid && Number.isFinite(Number(order.amountCents)) && order.amountCents !== null
+        ? Number(order.amountCents) : null
     });
   } catch (err) {
     console.error('Access check failed:', err);
@@ -3744,6 +3812,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, normalizeUsPhone, smsConsentText, SMS_SIGNUPS_PER_IP, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, sendPurchaseToMeta, normalizeUsPhone, smsConsentText, SMS_SIGNUPS_PER_IP, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
