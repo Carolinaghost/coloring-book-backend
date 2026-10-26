@@ -1783,6 +1783,29 @@ const SHOTS = [
   'medium-wide, face toward the viewer, head tilted'
 ];
 
+// The same job for a photo with two or three people in it. The single-subject
+// list frames close-ups ("head and shoulders filling the frame"), and with two
+// people a close-up can only be two heads pressed together - the photo again.
+// So these keep everyone in frame with room between them, and still move the
+// camera and the heads from page to page.
+const GROUP_SHOTS = [
+  'medium shot, both waist up, standing a little apart, one looking at the other',
+  'full body, head to toe, side by side with space between them, each busy with their own part of the scene',
+  'wide shot with plenty of the setting around them, both looking down at what their hands are doing',
+  'medium shot, three-quarter turn, facing each other across the scene',
+  'full body, one seated and one standing, faces toward the viewer',
+  'medium-wide shot, both chins down, focused on the activity',
+  'wide shot, one in front and one a step behind, glancing at each other',
+  'medium shot, one laughing with the head thrown back, the other smiling at them',
+  'full body, three-quarter turn, walking side by side',
+  'medium shot, one looking up at something above them, the other pointing at it',
+  'wide shot with the setting around them, both seen from the side at a three-quarter angle',
+  'medium shot, both chins up, eyes on something across the room',
+  'full body, facing each other, mid-conversation',
+  'medium-wide shot, one turned toward the viewer, the other looking at what they are holding',
+  'wide shot, both relaxed, each in their own seat or spot in the scene'
+];
+
 // A family book: up to this many people, each with their own photo. Five covers
 // two parents, two children and a grandparent, which is the shape most families
 // asking for this have. Every extra face is another likeness the model has to
@@ -1891,7 +1914,12 @@ function pluralizeVerb(word) {
 function consistencyLine(count, subjectType) {
   const possessive = subjectType === 'adult' ? 'person\'s' : 'child\'s';
   if (count > 1) {
-    return 'The reference photo shows ' + subjectPhrase(count, subjectType) + '. Keep each ' + possessive + ' face, hair and features recognisable across every scene. Recognisable means the same likeness, not the same pose: vary their posture, expression and viewing angle from scene to scene. Show them together, interacting, in every scene.';
+    // A photo of two or three people is usually a selfie or a hug, heads
+    // pressed together. Told only to "show them together", the model kept that
+    // exact pose on every page - fifteen scenes, the same two faces cheek to
+    // cheek (order 226, 26 Oct). So the togetherness is spelled out as
+    // separate people sharing a scene, never as the photo's pose.
+    return 'The reference photo shows ' + subjectPhrase(count, subjectType) + '. Keep each ' + possessive + ' face, hair and features recognisable across every scene. Recognisable means the same likeness, not the same pose: vary their posture, expression and viewing angle from scene to scene. Show them together in every scene, but as separate figures, each with their own body, posture and space around them: do not press their heads or cheeks together or lean their faces into each other the way they are posed in the photo, unless the scene itself is a hug. Each one does their own part of the scene - one may look at the other, at what they are doing, or toward the viewer, but never both copying the photo\'s smile at the camera.';
   }
   return 'Keep the face, hair and features of ' + subjectPhrase(count, subjectType) + ' recognisable from the reference photo across the whole story. Recognisable means the same likeness, not the same pose: the posture, expression and viewing angle should change from scene to scene.';
 }
@@ -2139,7 +2167,8 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people, 
   scene = scene.replace(/\bthe child\b/g, subject);
   const who = isFamily ? castLine(cast) : consistencyLine(childCount, subjectType);
   let prompt = `${BASE_STYLE} ${who} ${isFamily ? PHOTO_USE_MANY : PHOTO_USE} Scene: ${scene}.`;
-  prompt += ` Camera: ${SHOTS[sceneIndex % SHOTS.length]}.`;
+  const shots = !isFamily && childCount > 1 ? GROUP_SHOTS : SHOTS;
+  prompt += ` Camera: ${shots[sceneIndex % shots.length]}.`;
   prompt += wardrobeLine(theme, sceneIndex, isFamily || childCount > 1, subject);
   if (notes && notes.trim()) {
     prompt += ` Also incorporate this detail where it fits naturally: ${notes.trim()}.`;
