@@ -1339,7 +1339,8 @@ async function emailBookReady({ order, pdf, pageCount }) {
     orderId: order.id,
     accessToken: order.accessToken,
     siteUrl: SITE_URL,
-    pageCount
+    pageCount,
+    paid: Number(order.amountCents) > 0
   });
 
   // Attach the book unless it is big enough to bounce. Gmail refuses over 25MB

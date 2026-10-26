@@ -207,7 +207,10 @@ async function sendMail({ to, subject, text, html, attachments, from, replyTo, h
 }
 
 // The email a customer gets once their payment clears.
-function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }) {
+// paid: only a book someone paid for gets the review link. Trustpilot does not
+// allow review requests tied to a free product, so free-code books never see it.
+const TRUSTPILOT_REVIEW_URL = 'https://www.trustpilot.com/evaluate/crayonauts.com';
+function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount, paid }) {
   // The token rides in the URL FRAGMENT, not the query string: fragments are
   // not sent to servers and don't end up in access logs or Referer headers.
   const link = siteUrl + '?order=' + orderId + '#t=' + encodeURIComponent(accessToken);
@@ -222,6 +225,7 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
     'Keep this link - it is how you get back to your book. It works for 30 days,',
     'so download the PDF and save it somewhere safe.',
     '',
+    ...(paid ? ['Tell other parents what you think: ' + TRUSTPILOT_REVIEW_URL, ''] : []),
     '- Crayonauts'
   ].join('\n');
   const html = [
@@ -231,6 +235,7 @@ function orderReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount }
     '<p><a href="' + link + '" style="display:inline-block;background:#2F5FA8;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:bold;">Download your book</a></p>',
     '<p style="font-size:13px;color:#6B6357;">Keep this email - that link is how you get back to your book. '
     + 'It works for <strong>30 days</strong>, so download the PDF and save it somewhere safe.</p>',
+    paid ? '<p style="font-size:14px;">Tell other parents what you think &mdash; <a href="' + TRUSTPILOT_REVIEW_URL + '">review us on Trustpilot</a>.</p>' : '',
     '</div>'
   ].join('');
   return { subject, text, html };
