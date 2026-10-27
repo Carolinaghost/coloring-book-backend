@@ -19,6 +19,7 @@ const { main: affiliateReport, saturdayArgs, DEFAULT_REPORT_RATES } = require('.
 const neon = require('./neon');
 const textGuard = require('./text-guard');
 const metaCapi = require('./meta-capi');
+const dailyPayout = require('./daily-payout');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
@@ -3392,6 +3393,47 @@ async function maybeSendPayoutReport(at = new Date()) {
   return 'sent';
 }
 
+// ---------------------------------------------------------------------------
+// The daily payout (daily-payout.js): DAILY_PAYOUT_PERCENT of each day's sales
+// to the bank, the rest left in Stripe for creator payouts and refunds.
+// Off unless DAILY_PAYOUT_PERCENT is set, and it only works once the Stripe
+// account's payout schedule is MANUAL (Stripe refuses manual payouts while
+// automatic ones are on - that refusal arrives here as an alert email).
+const DAILY_PAYOUT_PERCENT = parseFloat(process.env.DAILY_PAYOUT_PERCENT) || 0;
+const DAILY_PAYOUT_HOUR = parseInt(process.env.DAILY_PAYOUT_HOUR, 10) || 10; // US Eastern
+
+async function maybeRunDailyPayout(at = new Date()) {
+  if (!(DAILY_PAYOUT_PERCENT > 0)) return 'off';
+  const here = localNow(at, PAYOUT_REPORT_TZ);
+  if (here.hour !== DAILY_PAYOUT_HOUR) return 'not now';
+  if (!STRIPE_SECRET_KEY) return 'no key';
+  let claimed = false;
+  try {
+    claimed = await db.claimJobRun('daily-payout', here.date);
+  } catch (err) {
+    console.error('Daily payout: could not claim the run -', err.message);
+    return 'claim failed';
+  }
+  if (!claimed) return 'already ran';
+  try {
+    const r = await dailyPayout.runDailyPayout({
+      key: STRIPE_SECRET_KEY, percent: DAILY_PAYOUT_PERCENT, today: here.date, tz: PAYOUT_REPORT_TZ
+    });
+    console.log('Daily payout:', JSON.stringify(r));
+    if (r.capped) {
+      await sendAlert({ level: 'WARN', subject: 'Daily payout was smaller than planned',
+        lines: [`${DAILY_PAYOUT_PERCENT}% of ${r.day} sales was more than the money available in Stripe, so $${(r.amount / 100).toFixed(2)} was paid out instead.`] }).catch(() => {});
+    }
+    return r.status;
+  } catch (err) {
+    console.error('Daily payout failed:', err.message);
+    await sendAlert({ level: 'ALERT', subject: 'Daily payout did not go out',
+      lines: [`The ${DAILY_PAYOUT_PERCENT}% payout for yesterday's sales failed: ${err.message}`,
+        'Nothing was paid, so that money is still in Stripe. If it says automatic payouts are on, set the payout schedule to Manual in the Stripe Dashboard.'] }).catch(() => {});
+    return 'failed';
+  }
+}
+
 // The only two things it is allowed to do on its own.
 async function rekickOrder(orderId) {
   if (rendering.has(String(orderId))) throw new Error('already rendering');
@@ -3463,6 +3505,15 @@ if (process.env.NODE_ENV !== 'test') {
       await maybeSendPayoutReport();
     } catch (err) {
       console.error('Payout report check failed:', err.message);
+    }
+  }, 60 * 60 * 1000).unref();
+
+  // The daily payout, on its own hourly timer for the same reason.
+  setInterval(async () => {
+    try {
+      await maybeRunDailyPayout();
+    } catch (err) {
+      console.error('Daily payout check failed:', err.message);
     }
   }, 60 * 60 * 1000).unref();
 }
@@ -3841,6 +3892,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, sendPurchaseToMeta, normalizeUsPhone, smsConsentText, SMS_SIGNUPS_PER_IP, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, maybeRunDailyPayout, sendPurchaseToMeta, normalizeUsPhone, smsConsentText, SMS_SIGNUPS_PER_IP, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
