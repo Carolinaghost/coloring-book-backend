@@ -82,8 +82,12 @@ function createPrintOrders({
     }
     const existing = await db.getPrintOrder(order.id);
     if (existing) return existing;               // a Stripe retry
+    // Several printed books bought in one checkout go out in one box (see
+    // prepareAndSend), so they share a key: the Stripe session.
+    const md = session.metadata || {};
+    const packageKey = md.orders && String(md.orders).includes(',') ? String(session.id || '') : '';
     const row = await db.savePrintOrder({
-      orderId: order.id, ship, shippingCents, status,
+      orderId: order.id, ship, shippingCents, status, packageKey,
       filesToken: crypto.randomBytes(18).toString('hex')
     });
     if (why) await db.updatePrintOrder(order.id, { lastError: why });
@@ -136,55 +140,101 @@ function createPrintOrders({
     return entry[which];
   }
 
+  // The printed copies that go out in one box with this one: every waiting
+  // copy from the same checkout (the same package key). A book bought on its
+  // own is a package of one. Copies on hold or already sent are left out -
+  // a held copy goes later, on its own, when it is released.
+  async function packageFor(row) {
+    if (!row.packageKey) return [row];
+    const all = await db.listPrintOrders(['waiting', 'preparing']);
+    const members = all.filter((r) => r.packageKey === row.packageKey);
+    return members.length ? members.sort((a, b) => a.orderId - b.orderId) : [row];
+  }
+
+  // How long a box waits for its slowest book. Past this, whatever is finished
+  // goes, and the rest follows on its own - one stuck book must not keep the
+  // others from ever being printed.
+  const PACKAGE_WAIT_MS = 24 * 60 * 60 * 1000;
+
   async function prepareAndSend(orderId) {
     let row = await db.getPrintOrder(orderId);
     if (!row || row.status !== 'waiting') return row;
     if (!lulu || !lulu.configured) return row;
-    const order = await db.getOrderWithToken(orderId);
-    if (!order) return row;
-    if (order.generationStatus !== 'done') return row;  // the book is not finished yet
 
+    let members = await packageFor(row);
+    if (members.some((m) => m.status === 'preparing')) return row;   // another pass has this box
+    const orders = new Map();
+    for (const m of members) {
+      const o = await db.getOrderWithToken(m.orderId);
+      if (o) orders.set(m.orderId, o);
+    }
+    const isDone = (m) => orders.has(m.orderId) && orders.get(m.orderId).generationStatus === 'done';
+    if (!isDone(row)) return row;  // the book is not finished yet
+    if (!members.every(isDone)) {
+      const waited = now() - new Date(row.createdAt).getTime();
+      if (waited < PACKAGE_WAIT_MS) return row;  // wait for the rest of the box
+      members = members.filter(isDone);
+    }
+
+    const ids = members.map((m) => m.orderId);
+    const lead = members[0];
     const attempts = row.attempts + 1;
-    row = await db.updatePrintOrder(orderId, { status: 'preparing', attempts });
+    for (const m of members) await db.updatePrintOrder(m.orderId, { status: 'preparing', attempts });
     try {
-      if (!row.coverColor) {
-        const pages = await db.listPages(orderId);
-        const first = pages.slice().sort((a, b) => (a.sceneIndex || 0) - (b.sceneIndex || 0))[0];
-        if (!first) throw new Error('the order has no pages');
-        const coloured = await colorize(first.image);
-        row = await db.updatePrintOrder(orderId, { coverColor: coloured });
+      const lineItems = [];
+      let pagesTotal = 0;
+      for (let m of members) {
+        m = await db.getPrintOrder(m.orderId);
+        const order = orders.get(m.orderId);
+        if (!m.coverColor) {
+          const pages = await db.listPages(m.orderId);
+          const first = pages.slice().sort((a, b) => (a.sceneIndex || 0) - (b.sceneIndex || 0))[0];
+          if (!first) throw new Error(`order ${m.orderId} has no pages`);
+          const coloured = await colorize(first.image);
+          m = await db.updatePrintOrder(m.orderId, { coverColor: coloured });
+        }
+        const files = await buildFiles(order, m);
+        pagesTotal += files.pageCount;
+        const name = String(order.childName || '').trim();
+        lineItems.push({
+          external_id: String(m.orderId),
+          title: (name ? name + "'s" : 'My') + ' Coloring Adventure',
+          quantity: 1,
+          printable_normalization: {
+            pod_package_id: POD_PACKAGE_ID,
+            interior: { source_url: fileUrl(m.orderId, m.filesToken, 'interior') },
+            cover: { source_url: fileUrl(m.orderId, m.filesToken, 'cover') }
+          }
+        });
       }
-      const files = await buildFiles(order, row);
-      const s = row.ship || {};
-      const name = String(order.childName || '').trim();
+      // One address for the box: the one the customer gave at checkout,
+      // which every copy in it carries.
+      const s = lead.ship || {};
       const payload = {
         contact_email: contactEmail,
-        external_id: `crayonauts-${orderId}`,
+        external_id: `crayonauts-${ids.join('-')}`,
         shipping_level: shippingLevel,
         shipping_address: {
           name: s.name, street1: s.street1, ...(s.street2 ? { street2: s.street2 } : {}),
           city: s.city, state_code: s.state_code, postcode: s.postcode,
           country_code: s.country_code, phone_number: s.phone_number, email: s.email
         },
-        line_items: [{
-          external_id: String(orderId),
-          title: (name ? name + "'s" : 'My') + ' Coloring Adventure',
-          quantity: 1,
-          printable_normalization: {
-            pod_package_id: POD_PACKAGE_ID,
-            interior: { source_url: fileUrl(orderId, row.filesToken, 'interior') },
-            cover: { source_url: fileUrl(orderId, row.filesToken, 'cover') }
-          }
-        }]
+        line_items: lineItems
       };
       const job = await lulu.createPrintJob(payload);
       const jobStatus = (job.status && job.status.name) || '';
-      row = await db.updatePrintOrder(orderId, {
-        status: 'sent', luluJobId: String(job.id || ''), luluStatus: jobStatus, lastError: ''
-      });
-      log.log(`Order ${orderId}: printed copy sent to Lulu as job ${job.id} (${jobStatus}, ${files.pageCount} pages).`);
-      await say('INFO', `Printed copy for order ${orderId} sent to Lulu`, [
+      for (const id of ids) {
+        const updated = await db.updatePrintOrder(id, {
+          status: 'sent', luluJobId: String(job.id || ''), luluStatus: jobStatus, lastError: ''
+        });
+        if (id === row.orderId) row = updated;
+      }
+      const which = ids.length > 1 ? `orders ${ids.join(', ')} (one box)` : `order ${orderId}`;
+      log.log(`Printed copies for ${which} sent to Lulu as job ${job.id} (${jobStatus}, ${pagesTotal} pages).`);
+      await say('INFO', ids.length > 1 ? `Printed copies for orders ${ids.join(', ')} sent to Lulu`
+        : `Printed copy for order ${orderId} sent to Lulu`, [
         `Lulu print job ${job.id}${lulu.sandbox ? ' (SANDBOX - nothing will be printed)' : ''}.`,
+        ...(ids.length > 1 ? [`${ids.length} books in one box.`] : []),
         `Ship to: ${s.name}, ${s.city} ${s.state_code}.`,
         `Status at Lulu: ${jobStatus || 'unknown'}.`
       ]);
@@ -192,11 +242,14 @@ function createPrintOrders({
     } catch (err) {
       const giveUp = attempts >= maxAttempts;
       log.error(`Order ${orderId}: printed copy attempt ${attempts} failed - ${err.message}`);
-      row = await db.updatePrintOrder(orderId, {
-        status: giveUp ? 'failed' : 'waiting', lastError: String(err.message).slice(0, 1000)
-      });
+      for (const id of ids) {
+        const updated = await db.updatePrintOrder(id, {
+          status: giveUp ? 'failed' : 'waiting', lastError: String(err.message).slice(0, 1000)
+        });
+        if (id === row.orderId) row = updated;
+      }
       if (giveUp) {
-        await say('ALERT', `Printed copy for order ${orderId} could not be sent to Lulu`, [
+        await say('ALERT', `Printed copy for order ${ids.join(', ')} could not be sent to Lulu`, [
           `Tried ${attempts} times. Last error: ${err.message}`,
           'The customer has their digital book. The printed copy needs a look.'
         ]);
@@ -230,11 +283,28 @@ function createPrintOrders({
     if (name === 'SHIPPED' || name === 'DELIVERED') {
       const trackingUrl = trackingFrom(job);
       row = await db.updatePrintOrder(row.orderId, { status: 'shipped', trackingUrl });
+      // Books in one box share one Lulu job, so one "on its way" email names
+      // them all, sent by the lowest order in the box. The others are marked
+      // as emailed without sending, so nobody gets the same parcel three times.
+      const box = row.packageKey
+        ? (await db.listPrintOrders()).filter((r) => r.luluJobId === row.luluJobId).sort((a, b) => a.orderId - b.orderId)
+        : [row];
+      const leadsBox = box[0].orderId === row.orderId;
+      if (!row.shippedEmailAt && !leadsBox) {
+        row = await db.updatePrintOrder(row.orderId, { shippedEmailAt: new Date(now()).toISOString() });
+      }
       if (!row.shippedEmailAt && mailer && mailer.configured) {
         const order = await db.getOrderWithToken(row.orderId);
         const to = (row.ship && row.ship.email) || (order && order.email);
+        const names = [];
+        if (box.length > 1) {
+          for (const b of box) {
+            const o = b.orderId === row.orderId ? order : await db.getOrderWithToken(b.orderId);
+            if (o && o.childName) names.push(o.childName);
+          }
+        }
         if (to) {
-          const mail = mailer.printShippedEmail({ childName: order && order.childName, trackingUrl });
+          const mail = mailer.printShippedEmail({ childName: order && order.childName, trackingUrl, names });
           await mailer.sendMail({ to, subject: mail.subject, text: mail.text, html: mail.html });
           row = await db.updatePrintOrder(row.orderId, { shippedEmailAt: new Date(now()).toISOString() });
         }

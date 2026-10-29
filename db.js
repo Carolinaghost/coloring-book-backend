@@ -415,6 +415,9 @@ async function initDb(attempt = 1) {
     await pool.query(CREATE_GIVEAWAY_SQL);
     await pool.query(CREATE_BOT_SQL);
     await pool.query(CREATE_PRINT_SQL);
+    // Books bought together and mailed in one box share a package key (the
+    // Stripe session id). Empty for a book bought on its own.
+    await pool.query("ALTER TABLE print_orders ADD COLUMN IF NOT EXISTS package_key TEXT NOT NULL DEFAULT ''");
     await pool.query(CREATE_SMS_SQL);
     ready = true;
     lastError = null;
@@ -611,6 +614,42 @@ async function markPaid(sessionId, amountCents) {
       RETURNING *`,
     [sessionId, amount]
   );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+// Several books paid for in one Stripe checkout (POST /checkout with
+// `extra`): every order in the cart carries the same session id, so this marks
+// them all and returns them all. markPaid above stays the one-book path and
+// still returns a single row. The amount is left alone here - what each book
+// actually cost is worked out from the session afterwards (setOrderAmount),
+// because one total for the whole cart is not any single book's price.
+async function markPaidAll(sessionId) {
+  if (!usingPostgres) {
+    const hits = memoryOrders.filter((x) => x.stripeSessionId === sessionId);
+    hits.forEach((o) => { o.paid = true; if (o.status === 'new' || !o.status) o.status = 'in_progress'; });
+    return hits.slice().sort((a, b) => a.id - b.id);
+  }
+  const { rows } = await pool.query(
+    `UPDATE orders
+        SET paid = TRUE, paid_at = COALESCE(paid_at, NOW()),
+            status = CASE WHEN status = 'new' THEN 'in_progress' ELSE status END
+      WHERE stripe_session_id = $1
+      RETURNING *`,
+    [sessionId]
+  );
+  return rows.map(rowToOrder).sort((a, b) => a.id - b.id);
+}
+
+async function setOrderAmount(id, amountCents) {
+  const amount = amountOrNull(amountCents);
+  if (amount === null) return null;
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => x.id === Number(id));
+    if (o) o.amountCents = amount;
+    return o || null;
+  }
+  const { rows } = await pool.query(
+    'UPDATE orders SET amount_cents = $2 WHERE id = $1 RETURNING *', [Number(id), amount]);
   return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
@@ -1903,7 +1942,7 @@ const PRINT_FIELDS = {
   status: 'status', ship: 'ship', shippingCents: 'shipping_cents', coverColor: 'cover_color',
   filesToken: 'files_token', luluJobId: 'lulu_job_id', luluStatus: 'lulu_status',
   trackingUrl: 'tracking_url', lastError: 'last_error', attempts: 'attempts',
-  shippedEmailAt: 'shipped_email_at'
+  shippedEmailAt: 'shipped_email_at', packageKey: 'package_key'
 };
 
 function rowToPrintOrder(row) {
@@ -1922,6 +1961,7 @@ function rowToPrintOrder(row) {
     lastError: row.last_error || '',
     attempts: row.attempts || 0,
     shippedEmailAt: row.shipped_email_at ? new Date(row.shipped_email_at).toISOString() : null,
+    packageKey: row.package_key || '',
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString()
   };
@@ -1929,7 +1969,7 @@ function rowToPrintOrder(row) {
 
 // First write wins: Stripe retries webhooks, and a retry must not reset a
 // copy that is already on its way to Lulu.
-async function savePrintOrder({ orderId, ship, shippingCents, status, filesToken }) {
+async function savePrintOrder({ orderId, ship, shippingCents, status, filesToken, packageKey }) {
   const id = Number(orderId);
   const shipText = JSON.stringify(ship || {});
   if (!usingPostgres) {
@@ -1938,15 +1978,16 @@ async function savePrintOrder({ orderId, ship, shippingCents, status, filesToken
       memoryPrintOrders.set(id, {
         order_id: id, status: status || 'waiting', ship: shipText, shipping_cents: shippingCents || 0,
         cover_color: null, files_token: filesToken || '', lulu_job_id: '', lulu_status: '',
-        tracking_url: '', last_error: '', attempts: 0, shipped_email_at: null, created_at: t, updated_at: t
+        tracking_url: '', last_error: '', attempts: 0, shipped_email_at: null, created_at: t, updated_at: t,
+        package_key: packageKey || ''
       });
     }
     return rowToPrintOrder(memoryPrintOrders.get(id));
   }
   await pool.query(
-    `INSERT INTO print_orders (order_id, status, ship, shipping_cents, files_token)
-     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (order_id) DO NOTHING`,
-    [id, status || 'waiting', shipText, Number(shippingCents) || 0, filesToken || '']);
+    `INSERT INTO print_orders (order_id, status, ship, shipping_cents, files_token, package_key)
+     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (order_id) DO NOTHING`,
+    [id, status || 'waiting', shipText, Number(shippingCents) || 0, filesToken || '', packageKey || '']);
   return getPrintOrder(id);
 }
 
@@ -2047,6 +2088,8 @@ async function getSmsOptin(phone) {
 }
 
 module.exports = {
+  markPaidAll,
+  setOrderAmount,
   saveSmsOptin,
   getSmsOptin,
   savePrintOrder,

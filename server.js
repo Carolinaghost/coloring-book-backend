@@ -20,6 +20,7 @@ const neon = require('./neon');
 const textGuard = require('./text-guard');
 const metaCapi = require('./meta-capi');
 const dailyPayout = require('./daily-payout');
+const cart = require('./cart');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
@@ -52,6 +53,9 @@ const FAMILY_PRICE_CENTS = parseInt(process.env.FAMILY_PRICE_CENTS, 10) || 2500;
 // only shows if the Lulu keys are there too. LULU_SANDBOX=true sends every job
 // to Lulu's test system, where nothing is printed or charged.
 const PRINT_SHIPPING_CENTS = parseInt(process.env.PRINT_SHIPPING_CENTS, 10) || 499;
+// Books in one checkout (see cart.js). Each is drawn on its own, so this is
+// also how many books one payment can set drawing at once.
+const MAX_CART_BOOKS = parseInt(process.env.MAX_CART_BOOKS, 10) || 5;
 const LULU_SANDBOX = process.env.LULU_SANDBOX === 'true';
 const lulu = createLulu({
   clientKey: LULU_SANDBOX ? process.env.LULU_SANDBOX_CLIENT_KEY : process.env.LULU_CLIENT_KEY,
@@ -204,6 +208,54 @@ function sendPurchaseToMeta(order, session) {
   }).catch(() => null);
 }
 
+// Everything that happens to one paid book: counted, its printed copy
+// recorded, drawing started, reported to Meta. `session` is that book's view
+// of the Stripe session - the real one for a single book, its share of the
+// totals for a book in a cart (see cart.splitSession).
+async function fulfilPaidOrder(order, session) {
+  // Counted here rather than in the browser: this is the only place a sale
+  // is certain, and it still lands even if the customer closes the tab
+  // before Stripe redirects them back.
+  if (order) {
+    db.recordEvent({
+      type: 'paid',
+      visitor: order.visitor,
+      source: order.source,
+      campaign: order.campaign,
+      orderId: order.id
+    }).catch((err) => console.error('Could not record paid event:', err.message));
+  }
+
+  // A printed copy: keep the address Stripe collected. Caught here, not
+  // answered with a 500 - a retry would not help a bad address, and the
+  // digital book must still start. A failure is emailed instead.
+  if (order) {
+    try {
+      await printOrders.recordPaidSession(session, order);
+    } catch (err) {
+      console.error(`Order ${order.id}: could not record the printed copy -`, err.message);
+      sendAlert({ level: 'ALERT', subject: `Printed copy for order ${order.id} was not recorded`,
+        lines: [`Stripe session ${session.id}: ${err.message}`, 'The digital book is unaffected.'] })
+        .catch(() => {});
+    }
+  }
+
+  // Start drawing the book on the server, in the background. We deliberately
+  // do NOT await it: Stripe times out webhooks in seconds, and a book takes
+  // minutes. The email goes out from renderBook once pages actually exist,
+  // so we never promise a book before it is real.
+  if (order) {
+    renderBook(order.id).catch((err) =>
+      console.error(`Order ${order.id}: background render crashed -`, err.message));
+  }
+
+  // Meta Conversions API. Paid sales only: a free-code book is never
+  // reported as a Purchase, so Meta does not learn to find free claims.
+  // The event id matches the one the browser's Pixel uses, so Meta keeps
+  // one copy. Not awaited - Stripe is waiting on this reply.
+  if (order && Number(session.amount_total) > 0) sendPurchaseToMeta(order, session);
+}
+
 // Mounted before express.json() on purpose — signature verification needs the
 // exact bytes Stripe sent, not a re-serialised object.
 app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
@@ -230,52 +282,32 @@ app.post('/stripe/webhook', express.raw({ type: '*/*' }), async (req, res) => {
       // out codes that take the money to zero and then quietly deliver
       // nothing. test/free-code.test.js plays a real free order through this
       // handler and fails if that protection is lost.
-      const order = await db.markPaid(session.id, session.amount_total);
-      console.log(order ? `Order ${order.id} marked paid.` : `No order for session ${session.id}.`);
+      // One book, or a cart of several paid together (cart.js). A cart's
+      // orders all carry this session id; each gets its own share of the
+      // session's totals, so everything below still sees one book at a time.
+      const md0 = session.metadata || {};
+      let parts;
+      if (md0.product === 'cart') {
+        const paidOrders = await db.markPaidAll(session.id);
+        parts = cart.splitSession(session, paidOrders,
+          { priceCents: PRICE_CENTS, familyPriceCents: FAMILY_PRICE_CENTS, shippingCents: PRINT_SHIPPING_CENTS });
+        for (const part of parts) {
+          const updated = await db.setOrderAmount(part.order.id, part.amountCents);
+          if (updated) part.order = updated;
+        }
+        console.log(parts.length ? `Cart of ${parts.length} books marked paid: orders ${parts.map((p) => p.order.id).join(', ')}.`
+          : `No orders for cart session ${session.id}.`);
+      } else {
+        const one = await db.markPaid(session.id, session.amount_total);
+        console.log(one ? `Order ${one.id} marked paid.` : `No order for session ${session.id}.`);
+        parts = one ? [{ order: one, session }] : [];
+      }
       // Somebody has paid. Whatever the pollers were doing, do it now.
       wakeUp();
 
-      // Counted here rather than in the browser: this is the only place a sale
-      // is certain, and it still lands even if the customer closes the tab
-      // before Stripe redirects them back.
-      if (order) {
-        db.recordEvent({
-          type: 'paid',
-          visitor: order.visitor,
-          source: order.source,
-          campaign: order.campaign,
-          orderId: order.id
-        }).catch((err) => console.error('Could not record paid event:', err.message));
+      for (const part of parts) {
+        await fulfilPaidOrder(part.order, part.session);
       }
-
-      // A printed copy: keep the address Stripe collected. Caught here, not
-      // answered with a 500 - a retry would not help a bad address, and the
-      // digital book must still start. A failure is emailed instead.
-      if (order) {
-        try {
-          await printOrders.recordPaidSession(session, order);
-        } catch (err) {
-          console.error(`Order ${order.id}: could not record the printed copy -`, err.message);
-          sendAlert({ level: 'ALERT', subject: `Printed copy for order ${order.id} was not recorded`,
-            lines: [`Stripe session ${session.id}: ${err.message}`, 'The digital book is unaffected.'] })
-            .catch(() => {});
-        }
-      }
-
-      // Start drawing the book on the server, in the background. We deliberately
-      // do NOT await it: Stripe times out webhooks in seconds, and a book takes
-      // minutes. The email goes out from renderBook once pages actually exist,
-      // so we never promise a book before it is real.
-      if (order) {
-        renderBook(order.id).catch((err) =>
-          console.error(`Order ${order.id}: background render crashed -`, err.message));
-      }
-
-      // Meta Conversions API. Paid sales only: a free-code book is never
-      // reported as a Purchase, so Meta does not learn to find free claims.
-      // The event id matches the one the browser's Pixel uses, so Meta keeps
-      // one copy. Not awaited - Stripe is waiting on this reply.
-      if (order && Number(session.amount_total) > 0) sendPurchaseToMeta(order, session);
     }
     if (event.type === 'account.updated') {
       // A creator finished Stripe's onboarding, or Stripe changed its mind
@@ -461,6 +493,13 @@ app.post('/orders/:id/status', async (req, res) => {
 // Stripe matches `code` exactly, so the upper-casing matters - codes are
 // created upper-case in the dashboard.
 async function resolvePromotionCode(code) {
+  const found = await resolvePromotion(code);
+  return found ? found.id : null;
+}
+
+// The whole promotion code, not just its id - the cart needs to know whether a
+// code gives a book away (see freeBookPromotion). Same rules as above.
+async function resolvePromotion(code) {
   const wanted = String(code || '').trim().toUpperCase();
   if (!wanted || wanted.length > 64 || !/^[A-Z0-9_-]+$/.test(wanted)) return null;
   if (!STRIPE_SECRET_KEY) return null;
@@ -475,13 +514,42 @@ async function resolvePromotionCode(code) {
     const found = Array.isArray(body.data) ? body.data[0] : null;
     // active is checked again rather than trusted from the query: a filter that
     // silently stopped filtering would quietly start honouring dead codes.
-    return found && found.active && found.id ? found.id : null;
+    return found && found.active && found.id ? found : null;
   } catch (err) {
     // A creator losing attribution is bad. A checkout that will not open
     // because Stripe was slow answering a side question is worse.
     console.error('Could not resolve promotion code:', err.message);
     return null;
   }
+}
+
+// Does this promotion code give a whole book away? A free-book code (the
+// giveaway, a creator's free book) is single use and meant for ONE book, but
+// a 100% coupon on a Stripe session takes every line to zero - so a cart with
+// three books and one free code would be three free books. Stripe's API
+// version decides where the coupon sits: inline as `coupon` on older ones, as
+// an id under `promotion.coupon` on newer ones, so both are read. When in
+// doubt (Stripe would not say) it answers true: refusing a free code on a cart
+// costs a customer one extra step, honouring it can cost several books.
+async function freeBookPromotion(found) {
+  if (!found) return false;
+  let coupon = found.coupon;
+  const promoCoupon = found.promotion && found.promotion.coupon;
+  if (!coupon && promoCoupon) coupon = promoCoupon;
+  if (typeof coupon === 'string') {
+    if (coupon === CREATOR_FREE_COUPON) return true;
+    try {
+      const resp = await fetch('https://api.stripe.com/v1/coupons/' + encodeURIComponent(coupon),
+        { headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` } });
+      if (!resp.ok) return true;
+      coupon = await resp.json();
+    } catch (err) {
+      return true;
+    }
+  }
+  if (!coupon || typeof coupon !== 'object') return true;
+  if (coupon.id === CREATOR_FREE_COUPON) return true;
+  return Number(coupon.percent_off) >= 100;
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,11 +1226,49 @@ app.post('/checkout', async (req, res) => {
       return res.status(400).json({ error: 'Printed copies are not available yet.' });
     }
     const isFamily = Array.isArray(order.people) && order.people.length > 1;
-    const amount = isFamily ? FAMILY_PRICE_CENTS : PRICE_CENTS;
-    const shippingCents = isPrint ? PRINT_SHIPPING_CENTS : 0;
-    const kind = isFamily ? 'Personalized family coloring book' : 'Personalized coloring book';
-    const label = isPrint ? `${kind} - digital PDF + free printed copy` : `${kind} - digital PDF`;
     await db.setOrderProduct(order.id, isPrint ? 'print' : 'digital');
+    order.product = isPrint ? 'print' : 'digital';
+
+    // More books in the same checkout: one per child, each already its own
+    // order with its own preview (the "Add another book" button). Each one is
+    // checked exactly as the first is - its own token, not paid yet, a name -
+    // and takes the email given here, because that is where all of them go.
+    const extraIn = Array.isArray(body.extra) ? body.extra : [];
+    if (extraIn.length > MAX_CART_BOOKS - 1) {
+      return res.status(400).json({ error: `Up to ${MAX_CART_BOOKS} books in one checkout.` });
+    }
+    const books = [order];
+    for (const item of extraIn) {
+      const it = item || {};
+      let other = await db.authorizeOrder(it.orderId, it.token);
+      if (!other) return res.status(403).json({ error: 'One of the books in your cart could not be found. Remove it and try again.' });
+      if (books.some((b) => b.id === other.id)) continue;
+      if (other.paid) return res.status(409).json({ error: 'One of the books in your cart is already paid for. Remove it and try again.' });
+      const otherName = String(it.childName || '').trim().slice(0, 200) || other.childName || '';
+      const otherFamily = Array.isArray(other.people) && other.people.length > 1;
+      if (!otherName && !otherFamily) return res.status(400).json({ error: 'Each book in your cart needs a name.' });
+      const updated = await db.setOrderContact(other.id, { childName: otherName, email: order.email });
+      if (updated) other = updated;
+      const otherPrint = it.product === 'print';
+      if (otherPrint && !PRINT_ENABLED) {
+        return res.status(400).json({ error: 'Printed copies are not available yet.' });
+      }
+      await db.setOrderProduct(other.id, otherPrint ? 'print' : 'digital');
+      other.product = otherPrint ? 'print' : 'digital';
+      books.push(other);
+    }
+    const isCart = books.length > 1;
+    const prices = { priceCents: PRICE_CENTS, familyPriceCents: FAMILY_PRICE_CENTS, shippingCents: PRINT_SHIPPING_CENTS };
+    const quotes = books.map((b) => cart.priceFor(b, prices));
+    const amount = quotes.reduce((a, q) => a + q.bookCents, 0);
+    const printCount = books.filter((b) => b.product === 'print').length;
+    // One shipping charge per checkout, however many printed copies: books
+    // bought together are mailed together, in one box (print-orders.js), and
+    // Lulu charges far less for the second book in a box than for a second box.
+    const shippingCents = printCount > 0 ? PRINT_SHIPPING_CENTS : 0;
+    // What each order is recorded as costing until Stripe confirms: its book,
+    // plus its share of that one shipping charge.
+    const shipShares = cart.shareOut(shippingCents, quotes.map((q) => q.shipCents));
 
     // Stripe's API takes form-encoded bodies, not JSON.
     const form = new URLSearchParams();
@@ -1171,17 +1277,28 @@ app.post('/checkout', async (req, res) => {
     // real value of the sale to the ad pixel. A discount code can make what
     // Stripe actually charges lower than this - the pixel is for measuring
     // which ads produce sales, not for the books, which are Stripe's number.
-    form.append('success_url', `${SITE_URL}?paid=1&order=${order.id}&amt=${((amount + shippingCents) / 100).toFixed(2)}`);
+    const more = isCart ? '&more=' + books.slice(1).map((b) => b.id).join('-') : '';
+    form.append('success_url', `${SITE_URL}?paid=1&order=${order.id}&amt=${((amount + shippingCents) / 100).toFixed(2)}${more}`);
     form.append('cancel_url', `${SITE_URL}?canceled=1&order=${order.id}`);
     form.append('client_reference_id', String(order.id));
     if (order.email) form.append('customer_email', order.email);
-    form.append('line_items[0][quantity]', '1');
-    form.append('line_items[0][price_data][currency]', 'usd');
-    form.append('line_items[0][price_data][unit_amount]', String(amount));
-    form.append('line_items[0][price_data][product_data][name]', label);
-    form.append('line_items[0][price_data][product_data][description]',
-      `${order.pageCount || 15} pages starring ${order.childName}`);
-    form.append('metadata[product]', isPrint ? 'print' : 'digital');
+    books.forEach((b, i) => {
+      const bFamily = Array.isArray(b.people) && b.people.length > 1;
+      const kind = bFamily ? 'Personalized family coloring book' : 'Personalized coloring book';
+      const label = b.product === 'print' ? `${kind} - digital PDF + free printed copy` : `${kind} - digital PDF`;
+      const star = b.childName || (bFamily ? b.people.map((p) => p.name).filter(Boolean).join(', ') : '');
+      form.append(`line_items[${i}][quantity]`, '1');
+      form.append(`line_items[${i}][price_data][currency]`, 'usd');
+      form.append(`line_items[${i}][price_data][unit_amount]`, String(quotes[i].bookCents));
+      form.append(`line_items[${i}][price_data][product_data][name]`, label);
+      form.append(`line_items[${i}][price_data][product_data][description]`,
+        `${b.pageCount || 15} pages starring ${star}`);
+    });
+    // One book: 'print' or 'digital', as it always was. A cart can be a mix,
+    // so it says 'cart' and each order's own product is what counts - see
+    // cart.splitSession, which puts the right one on each order's copy.
+    form.append('metadata[product]', isCart ? 'cart' : (isPrint ? 'print' : 'digital'));
+    if (isCart) form.append('metadata[orders]', books.map((b) => b.id).join(','));
     // Kept on the session so the Purchase sent from the webhook can be matched
     // to the ad click: Meta's cookie ids, the IP address and the browser, plus
     // the page. The webhook has none of these itself.
@@ -1191,14 +1308,16 @@ app.post('/checkout', async (req, res) => {
     if (fbDetails.ip) form.append('metadata[fb_ip]', fbDetails.ip);
     if (fbDetails.ua) form.append('metadata[fb_ua]', fbDetails.ua);
     if (fbDetails.url) form.append('metadata[fb_url]', fbDetails.url);
-    if (isPrint) {
+    if (printCount > 0) {
       // Lulu needs a phone number on every address - the carriers require it.
       form.append('shipping_address_collection[allowed_countries][0]', 'US');
       form.append('phone_number_collection[enabled]', 'true');
       form.append('shipping_options[0][shipping_rate_data][type]', 'fixed_amount');
-      form.append('shipping_options[0][shipping_rate_data][fixed_amount][amount]', String(PRINT_SHIPPING_CENTS));
+      form.append('shipping_options[0][shipping_rate_data][fixed_amount][amount]', String(shippingCents));
       form.append('shipping_options[0][shipping_rate_data][fixed_amount][currency]', 'usd');
-      form.append('shipping_options[0][shipping_rate_data][display_name]', 'Printed copy - shipping & handling (US mail)');
+      form.append('shipping_options[0][shipping_rate_data][display_name]', printCount > 1
+        ? `${printCount} printed copies in one box - shipping & handling (US mail)`
+        : 'Printed copy - shipping & handling (US mail)');
     }
 
     // Creator codes. The codes live in the Stripe dashboard, one per creator,
@@ -1224,9 +1343,18 @@ app.post('/checkout', async (req, res) => {
     // This has to be settled before the consent copy below is taken, or only
     // one of the two sessions carries it and the box disappears on whichever
     // path was missed.
-    const promoId = await resolvePromotionCode(code);
+    const promo = await resolvePromotion(code);
+    const promoId = promo ? promo.id : null;
+    // A cart is never offered Stripe's typing box: a single-use free-book
+    // code typed there would take every book in it to zero. Codes for a cart
+    // come through our own page instead, where a free-book one is turned away.
+    if (isCart && promo && await freeBookPromotion(promo)) {
+      return res.status(400).json({
+        error: 'A free-book code covers one book. Remove the other books from your cart to use it, or check out without the code.'
+      });
+    }
     if (promoId) form.append('discounts[0][promotion_code]', promoId);
-    else form.append('allow_promotion_codes', 'true');
+    else if (!isCart) form.append('allow_promotion_codes', 'true');
 
     // Make the customer tick a box agreeing to immediate delivery before paying.
     // Stripe records the acceptance against the payment, which is the evidence
@@ -1310,8 +1438,10 @@ app.post('/checkout', async (req, res) => {
       return res.status(502).json({ error: 'Could not start checkout.', detail: msg });
     }
 
-    await db.attachCheckoutSession(order.id, session.id, amount + shippingCents);
-    res.json({ url: session.url, amountCents: amount + shippingCents });
+    for (let i = 0; i < books.length; i++) {
+      await db.attachCheckoutSession(books[i].id, session.id, quotes[i].bookCents + shipShares[i]);
+    }
+    res.json({ url: session.url, amountCents: amount + shippingCents, books: books.length });
 
     // The server copy of the Pixel's InitiateCheckout, same id as the browser's.
     const icId = body.fb && typeof body.fb.icId === 'string' && /^ic-[a-z0-9-]{6,60}$/.test(body.fb.icId) ? body.fb.icId : '';
@@ -1322,7 +1452,9 @@ app.post('/checkout', async (req, res) => {
         email: order.email, externalId: order.id,
         fbp: fbDetails.fbp, fbc: fbDetails.fbc, ip: fbDetails.ip, ua: fbDetails.ua,
         customData: { value: (amount + shippingCents) / 100, currency: 'USD', content_type: 'product',
-          content_ids: [isFamily ? 'family' : 'personal'] }
+          content_ids: isCart ? books.map((b) => (Array.isArray(b.people) && b.people.length > 1 ? 'family' : 'personal'))
+            : [isFamily ? 'family' : 'personal'],
+          num_items: books.length }
       }).catch(() => null);
     }
   } catch (err) {
