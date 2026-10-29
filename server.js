@@ -1364,7 +1364,7 @@ app.post('/checkout', async (req, res) => {
     const consent = new URLSearchParams(form);
     consent.append('consent_collection[terms_of_service]', 'required');
     consent.append('custom_text[terms_of_service_acceptance][message]',
-      'Your book starts being drawn as soon as you pay. I agree to the '
+      (isCart ? 'Your books start being drawn as soon as you pay. I agree to the ' : 'Your book starts being drawn as soon as you pay. I agree to the ')
       + '[terms](' + SITE_URL.replace(/\/+$/, '') + '/legal.html#terms)'
       + ' and to immediate delivery.');
 
