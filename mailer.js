@@ -512,12 +512,19 @@ function reviewAskEmail({ name, reviewUrl }) {
 
 // Plain text from the support assistant, with a matching HTML part.
 // The printed copy has left Lulu. One email, with the tracking link.
-function printShippedEmail({ childName, trackingUrl }) {
-  const who = String(childName || '').trim();
-  const book = who ? who + "'s printed coloring book" : 'your printed coloring book';
-  const subject = (who ? book : 'Your printed coloring book') + ' is on its way';
+// `names`: the books in one box when several were bought together - one email
+// for the parcel, naming every book in it.
+function printShippedEmail({ childName, trackingUrl, names }) {
+  const list = (Array.isArray(names) ? names : []).map((n) => String(n || '').trim()).filter(Boolean);
+  const several = list.length > 1;
+  const joined = several ? list.slice(0, -1).join(', ') + ' and ' + list[list.length - 1] : '';
+  const who = several ? '' : String(childName || '').trim();
+  const book = several ? 'the printed coloring books for ' + joined
+    : (who ? who + "'s printed coloring book" : 'your printed coloring book');
+  const subject = several ? 'Your printed coloring books are on their way'
+    : (who ? book : 'Your printed coloring book') + ' is on its way';
   const lines = [
-    'Good news: ' + book + ' has shipped.',
+    'Good news: ' + book + (several ? ' have shipped, together in one box.' : ' has shipped.'),
     ''
   ];
   if (trackingUrl) lines.push('Track it here:', trackingUrl, '');
@@ -526,7 +533,7 @@ function printShippedEmail({ childName, trackingUrl }) {
   const text = lines.join('\n');
   const html = [
     '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#2A2724;">',
-    '<p>Good news: ' + escapeHtml(book) + ' has shipped.</p>',
+    '<p>Good news: ' + escapeHtml(book) + (several ? ' have shipped, together in one box.' : ' has shipped.') + '</p>',
     trackingUrl ? '<p><a href="' + escapeHtml(trackingUrl) + '" style="display:inline-block;background:#E8622C;color:#fff;'
       + 'padding:10px 18px;border-radius:999px;text-decoration:none;font-weight:bold;">Track your book</a></p>' : '',
     '<p>' + (trackingUrl ? 'It comes by regular mail, and the tracking link shows where it is.' : 'It comes by regular mail.') + '</p>',
