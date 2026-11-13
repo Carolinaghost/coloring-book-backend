@@ -294,6 +294,12 @@ const MIGRATIONS = [
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS visitor TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''",
+  // "Your book is waiting" reminders to people who gave their email at Unlock
+  // and then did not pay. Each stamp is set once, before sending, so two sweeps
+  // cannot both send it. reminders_off is the customer's own stop link.
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS reminder1_at TIMESTAMPTZ",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS reminder2_at TIMESTAMPTZ",
+  "ALTER TABLE orders ADD COLUMN IF NOT EXISTS reminders_off BOOLEAN NOT NULL DEFAULT FALSE",
   // A family book: one entry per person, each with their own photo, in the
   // order the pages should introduce them. Null for a single-subject book,
   // which still uses child_count, subject_type and the one photo column.
@@ -487,6 +493,9 @@ function rowToOrder(row) {
     previewRescueAt: row.preview_rescue_at ? new Date(row.preview_rescue_at).toISOString() : null,
     previewAttempts: row.preview_attempts || 0,
     previewEmailedAt: row.preview_emailed_at ? new Date(row.preview_emailed_at).toISOString() : null,
+    reminder1At: row.reminder1_at ? new Date(row.reminder1_at).toISOString() : null,
+    reminder2At: row.reminder2_at ? new Date(row.reminder2_at).toISOString() : null,
+    remindersOff: row.reminders_off === true,
     visitor: row.visitor || '',
     source: row.source || '',
     campaign: row.campaign || '',
@@ -516,6 +525,9 @@ async function saveOrder(order) {
       previewRescueAt: null,
       previewAttempts: 0,
       previewEmailedAt: null,
+      reminder1At: null,
+      reminder2At: null,
+      remindersOff: false,
       ...order
     };
     memoryOrders.push(saved);
@@ -2087,7 +2099,116 @@ async function getSmsOptin(phone) {
   return rowToSms(rows[0]);
 }
 
+// ---- "Your book is waiting" reminders ---------------------------------------
+//
+// Only people who typed their email at Unlock and then did not pay. Someone who
+// only looked at the free preview never gave an address, so is never written to.
+//
+// Stage 1 goes `firstMinutes` after the order was started; stage 2 goes
+// `secondMinutes` after stage 1. Neither goes to an address that has paid for
+// any order, has pressed the stop link, or was already reminded in the last
+// week about another order - one person making three previews gets one email,
+// about the newest. Nothing older than three days (four for stage 2) is ever
+// picked up, so switching this on does not mail everyone from last month.
+async function reminderCandidates(stage, firstMinutes, secondMinutes) {
+  const first = Number(firstMinutes) > 0 ? Number(firstMinutes) : 60;
+  const second = Number(secondMinutes) > 0 ? Number(secondMinutes) : 1320;
+  const lc = (e) => String(e || '').trim().toLowerCase();
+  if (!usingPostgres) {
+    const now = Date.now();
+    const blocked = (email, self) => memoryOrders.some((x) => lc(x.email) === email
+      && (x.paid || x.remindersOff
+        || (x !== self && x.reminder1At && now - new Date(x.reminder1At).getTime() < 7 * 86400000)));
+    const newestUnpaid = (email) => Math.max(...memoryOrders
+      .filter((x) => lc(x.email) === email && !x.paid).map((x) => x.id));
+    return memoryOrders.filter((o) => {
+      const email = lc(o.email);
+      if (!email || o.paid || o.remindersOff) return false;
+      // (The in-memory store keeps no pages, so there is nothing to check here.)
+      const age = now - new Date(o.submittedAt).getTime();
+      if (stage === 1) {
+        if (o.reminder1At) return false;
+        if (age < first * 60000 || age > 3 * 86400000) return false;
+        if (newestUnpaid(email) !== o.id) return false;
+      } else {
+        if (!o.reminder1At || o.reminder2At) return false;
+        if (now - new Date(o.reminder1At).getTime() < second * 60000) return false;
+        if (age > 4 * 86400000) return false;
+      }
+      return !blocked(email, o);
+    }).map((o) => o.id);
+  }
+  const common = "o.paid = FALSE AND o.email <> '' AND o.reminders_off = FALSE "
+    + 'AND EXISTS (SELECT 1 FROM order_pages p WHERE p.order_id = o.id) '
+    + 'AND NOT EXISTS (SELECT 1 FROM orders x WHERE lower(x.email) = lower(o.email) '
+    + "  AND (x.paid OR x.reminders_off OR (x.id <> o.id AND x.reminder1_at > NOW() - INTERVAL '7 days'))) ";
+  const sql = stage === 1
+    ? 'SELECT o.id FROM orders o WHERE ' + common
+      + 'AND o.reminder1_at IS NULL '
+      + "AND o.submitted_at < NOW() - $1::numeric * INTERVAL '1 minute' "
+      + "AND o.submitted_at > NOW() - INTERVAL '3 days' "
+      + 'AND o.id = (SELECT MAX(y.id) FROM orders y WHERE lower(y.email) = lower(o.email) AND y.paid = FALSE) '
+      + 'ORDER BY o.id'
+    : 'SELECT o.id FROM orders o WHERE ' + common
+      + 'AND o.reminder1_at IS NOT NULL AND o.reminder2_at IS NULL '
+      + "AND o.reminder1_at < NOW() - $1::numeric * INTERVAL '1 minute' "
+      + "AND o.submitted_at > NOW() - INTERVAL '4 days' "
+      + 'ORDER BY o.id';
+  const { rows } = await pool.query(sql, [stage === 1 ? first : second]);
+  return rows.map((r) => r.id);
+}
+
+// Claims one reminder for sending. True for exactly one caller.
+async function claimReminder(id, stage) {
+  const col = stage === 1 ? 'reminder1_at' : 'reminder2_at';
+  const key = stage === 1 ? 'reminder1At' : 'reminder2At';
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => String(x.id) === String(id));
+    if (!o || o[key] || o.paid || o.remindersOff) return false;
+    o[key] = new Date().toISOString();
+    return true;
+  }
+  const { rows } = await pool.query(
+    `UPDATE orders SET ${col} = NOW() WHERE id = $1 AND ${col} IS NULL AND paid = FALSE `
+    + 'AND reminders_off = FALSE RETURNING id', [Number(id)]);
+  return rows.length > 0;
+}
+
+// Hands a claimed reminder back when the send failed, so a bounce is not
+// mistaken for a delivery.
+async function releaseReminder(id, stage) {
+  const col = stage === 1 ? 'reminder1_at' : 'reminder2_at';
+  const key = stage === 1 ? 'reminder1At' : 'reminder2At';
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => String(x.id) === String(id));
+    if (o) o[key] = null;
+    return;
+  }
+  await pool.query(`UPDATE orders SET ${col} = NULL WHERE id = $1`, [Number(id)]);
+}
+
+// The stop link. Turns reminders off for every order under that email, so a
+// second preview made later does not start them again.
+async function stopReminders(id) {
+  const lc = (e) => String(e || '').trim().toLowerCase();
+  if (!usingPostgres) {
+    const o = memoryOrders.find((x) => String(x.id) === String(id));
+    if (!o) return false;
+    const email = lc(o.email);
+    memoryOrders.forEach((x) => { if (x === o || (email && lc(x.email) === email)) x.remindersOff = true; });
+    return true;
+  }
+  const { rowCount } = await pool.query(
+    'UPDATE orders SET reminders_off = TRUE WHERE id = $1 '
+    + "OR (lower(email) = (SELECT lower(email) FROM orders WHERE id = $1) AND email <> '')", [Number(id)]);
+  return rowCount > 0;
+}
+
 module.exports = {
+  reminderCandidates,
+  claimReminder,
+  releaseReminder,
+  stopReminders,
   markPaidAll,
   setOrderAmount,
   saveSmsOptin,

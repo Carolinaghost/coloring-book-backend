@@ -3975,6 +3975,104 @@ async function rescueFailedPreviews() {
   }
 }
 
+// ---- "Your book is waiting" reminders --------------------------------------
+//
+// Up to two emails to someone who typed their email at Unlock and then did not
+// pay: one about an hour later, one about a day after that. db.reminderCandidates
+// decides who; this only sends. Off switch: REMINDER_EMAILS=off on Render.
+const REMINDERS_ON = String(process.env.REMINDER_EMAILS || 'on').toLowerCase() !== 'off';
+const REMINDER1_MINUTES = parseInt(process.env.REMINDER1_MINUTES, 10) || 60;
+const REMINDER2_MINUTES = parseInt(process.env.REMINDER2_MINUTES, 10) || 1320;
+const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api.crayonauts.com';
+
+// The stop link carries a signature made from the order's own secret, never the
+// secret itself, so a stop link in a log cannot be used to open the book.
+function reminderStopSig(order) {
+  return crypto.createHmac('sha256', String(order.accessToken || ''))
+    .update('stop-reminders:' + order.id).digest('hex').slice(0, 24);
+}
+function reminderStopUrl(order) {
+  return PUBLIC_API_URL + '/reminders/stop?o=' + encodeURIComponent(order.id) + '&s=' + reminderStopSig(order);
+}
+
+async function sendReminder(id, stage) {
+  const order = await db.getOrderWithToken(id);
+  if (!order || order.paid || !order.email || !order.accessToken) return false;
+  if (!(await db.claimReminder(id, stage))) return false;
+  try {
+    const attachments = [];
+    for (const page of await db.listPages(id)) {
+      if (page.sceneIndex >= FREE_PREVIEW_PAGES) continue;
+      const { buffer, mimetype } = dataUrlToBuffer(page.image);
+      attachments.push({ filename: `page-${page.sceneIndex + 1}.png`, contentType: mimetype || 'image/png', content: buffer });
+    }
+    const scenes = STORY_SCENES[order.theme] || STORY_SCENES['Portrait'];
+    const stopUrl = reminderStopUrl(order);
+    const msg = mailer.bookWaitingEmail({
+      childName: order.childName,
+      orderId: order.id,
+      accessToken: order.accessToken,
+      siteUrl: SITE_URL,
+      stopUrl,
+      stage,
+      pageCount: attachments.length,
+      totalPages: scenes.length,
+      printLine: PRINT_ENABLED
+        ? 'Want it printed? Add a printed copy mailed to you for $' + (PRINT_SHIPPING_CENTS / 100).toFixed(2)
+          + ' shipping (US, 12-14 business days).'
+        : ''
+    });
+    await mailer.sendMail({
+      to: order.email, subject: msg.subject, text: msg.text, html: msg.html, attachments,
+      headers: ['List-Unsubscribe: <' + stopUrl + '>']
+    });
+    console.log(`Order ${id}: book-waiting reminder ${stage} sent.`);
+    return true;
+  } catch (err) {
+    await db.releaseReminder(id, stage).catch(() => {});
+    console.error(`Order ${id}: book-waiting reminder ${stage} failed - ${err.message}`);
+    return false;
+  }
+}
+
+let remindersRunning = false;
+async function sendDueReminders() {
+  if (!REMINDERS_ON || !mailer.configured || remindersRunning) return 0;
+  remindersRunning = true;
+  let sent = 0;
+  try {
+    for (const stage of [1, 2]) {
+      const ids = await db.reminderCandidates(stage, REMINDER1_MINUTES, REMINDER2_MINUTES);
+      for (const id of ids) if (await sendReminder(id, stage)) sent++;
+    }
+  } catch (err) {
+    console.error('Reminder sweep failed:', err.message);
+  } finally {
+    remindersRunning = false;
+  }
+  return sent;
+}
+
+app.get('/reminders/stop', async (req, res) => {
+  const page = (msg) => '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>Crayonauts</title><div style="font-family:Helvetica,Arial,sans-serif;max-width:480px;margin:60px auto;padding:0 16px;color:#242636;">'
+    + '<h2>Crayonauts</h2><p>' + msg + '</p><p><a href="' + SITE_URL + '" style="color:#E85D4A;">crayonauts.com</a></p></div>';
+  try {
+    const order = await db.getOrderWithToken(String(req.query.o || '').replace(/\D/g, ''));
+    const sig = String(req.query.s || '');
+    const want = order ? reminderStopSig(order) : '';
+    const ok = order && sig.length === want.length
+      && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want));
+    if (!ok) return res.status(404).type('html').send(page('That link is not valid. Email support@crayonauts.com and we will stop the reminders for you.'));
+    await db.stopReminders(order.id);
+    console.log(`Order ${order.id}: reminders stopped by the customer.`);
+    return res.type('html').send(page('Done. You will not get any more reminder emails from us.'));
+  } catch (err) {
+    console.error('Reminder stop failed:', err.message);
+    return res.status(500).type('html').send(page('Something went wrong. Email support@crayonauts.com and we will stop the reminders for you.'));
+  }
+});
+
 // One timer for both the resume sweep and the watchdog. Separate timers would
 // wake the database twice as often for no extra safety, and it is the number of
 // wakes that costs, not the work done in them.
@@ -3986,6 +4084,7 @@ async function heartbeat() {
     await resumeUnfinished();
     await rescueFailedPreviews();
     await maybeSweepPrints();
+    await sendDueReminders();
     // While busy the sweep runs every minute, but the watchdog has nothing new
     // to say that often. When idle they share the one wake.
     const due = Date.now() - lastWatchdogAt >= WATCHDOG_MINUTES * 60 * 1000;
@@ -4024,6 +4123,6 @@ if (require.main === module) {
   setTimeout(() => { heartbeat(); }, 20 * 1000);
 }
 
-module.exports = { app, maybeRunDailyPayout, sendPurchaseToMeta, normalizeUsPhone, smsConsentText, SMS_SIGNUPS_PER_IP, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
+module.exports = { app, sendDueReminders, sendReminder, reminderStopSig, reminderStopUrl, maybeRunDailyPayout, sendPurchaseToMeta, normalizeUsPhone, smsConsentText, SMS_SIGNUPS_PER_IP, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
   sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
