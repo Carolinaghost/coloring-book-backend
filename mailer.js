@@ -285,6 +285,56 @@ function previewReadyEmail({ childName, orderId, accessToken, siteUrl, pageCount
   return { subject, text, html };
 }
 
+
+// "Your book is waiting": up to two reminders to someone who typed their email
+// at Unlock and then did not pay. The free pages ride along when we have them.
+// Every one carries the stop link and the postal address - these are the only
+// emails we send that the customer did not directly ask for.
+function bookWaitingEmail({ childName, orderId, accessToken, siteUrl, stopUrl, stage, pageCount, totalPages, printLine }) {
+  const link = siteUrl + '?order=' + orderId + '#t=' + encodeURIComponent(accessToken);
+  const who = childName || 'your child';
+  const whoHtml = escapeHtml(who);
+  const pages = pageCount === 1 ? 'page is' : 'pages are';
+  const second = stage === 2;
+  const subject = second
+    ? 'Still thinking about ' + who + "'s coloring book?"
+    : who + "'s coloring book is waiting for you";
+  const opener = second
+    ? 'Just a last note: ' + who + "'s coloring book is still saved, ready whenever you are."
+    : 'You started a coloring book for ' + who + ' on Crayonauts. It is saved, ready whenever you are.';
+  const attachedLine = pageCount ? 'Your free ' + pages + ' attached so you can see them again.' : '';
+  const address = 'Crayonauts, a service of Justice United Inc, 30 N Gould St, Ste R, Sheridan, WY 82801';
+  const text = [
+    opener,
+    attachedLine,
+    '',
+    'Finish ' + who + "'s book - all " + totalPages + ' pages - here:',
+    link,
+    '',
+    printLine || '',
+    "Not happy with how it comes out? We'll redraw it once, free.",
+    'Nothing has been charged.',
+    '',
+    '- Crayonauts',
+    '',
+    "Don't want these reminders? " + stopUrl,
+    address
+  ].filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n');
+  const html = [
+    '<div style="font-family:Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#242636;">',
+    '<h2 style="color:#242636;">' + (second ? 'Still thinking it over?' : whoHtml + '&rsquo;s book is waiting') + '</h2>',
+    '<p>' + escapeHtml(opener) + (attachedLine ? ' ' + escapeHtml(attachedLine) : '') + '</p>',
+    '<p><a href="' + link + '" style="display:inline-block;background:#E85D4A;color:#fff;padding:12px 22px;'
+    + 'border-radius:8px;text-decoration:none;font-weight:bold;">Finish ' + whoHtml + '&rsquo;s book</a></p>',
+    printLine ? '<p>' + escapeHtml(printLine) + '</p>' : '',
+    '<p style="font-size:14px;">Not happy with how it comes out? We&rsquo;ll redraw it once, free. Nothing has been charged.</p>',
+    '<p style="font-size:12px;color:#6B6357;margin-top:28px;">Don&rsquo;t want these reminders? '
+    + '<a href="' + stopUrl + '" style="color:#6B6357;">Stop them here</a>.<br>' + escapeHtml(address) + '</p>',
+    '</div>'
+  ].join('');
+  return { subject, text, html };
+}
+
 // The one email a new creator gets. Everything they need to start earning is
 // in it, and nothing they have to fill in is: bank details and the W-9 are
 // collected by the payment service, in a separate invite, because a routing
@@ -556,4 +606,4 @@ function escapeHtml(v) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-module.exports = { sendMail, printShippedEmail, giveawayCodeEmail, reviewAskEmail, plainEmail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, creatorPayoutSetupEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
+module.exports = { sendMail, bookWaitingEmail, printShippedEmail, giveawayCodeEmail, reviewAskEmail, plainEmail, orderReadyEmail, previewReadyEmail, creatorWelcomeEmail, creatorPayoutSetupEmail, buildMessage, configured, HOST, PORT, SECURE, USER: USER || null };
