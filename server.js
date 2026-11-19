@@ -1,5 +1,6 @@
 require('dotenv').config();
 const sharp = require('sharp');
+const { levelPhoto } = require('./photo-level');
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -1888,9 +1889,13 @@ function wardrobeLine(theme, sceneIndex, plural, subject) {
 // passport photos. buildPrompt walks this list with sceneIndex, and every theme
 // is 15 scenes long, so a book uses each entry once and never repeats a shot.
 //
-// Every entry moves two things: where the head is pointing (chin up, chin down,
-// tilted, a three-quarter turn, looking back over the shoulder, a sideways
-// glance) and how close the camera is (close-up, medium, full body, wide).
+// Every entry moves where the head is pointing (chin up, chin down, a
+// three-quarter turn, looking back over the shoulder, a sideways glance) and/or
+// how close the camera is (close-up, medium, full body, wide).
+//
+// Never a head TILT (leaning to one side). Four entries asked for one until 19
+// Nov 2026, and a tilted head was the thing Jonathan disliked most in the
+// pages: it reads as posed and unnatural. HEAD_LEVEL below says so outright.
 // Both axes verified against live output.
 //
 // NEVER add "from behind", a strict side profile, or "running away" to this
@@ -1899,21 +1904,21 @@ function wardrobeLine(theme, sceneIndex, plural, subject) {
 // stranger in it. "Looking back over the shoulder toward the viewer" is the
 // safe way to get the same feeling, because the face stays in frame.
 const SHOTS = [
-  'medium shot, waist up, head tilted slightly, face toward the viewer',
+  'medium shot, waist up, face toward the viewer',
   'close-up, head and shoulders filling the frame, chin up',
   'full body, head to toe, three-quarter turn with the face toward the viewer',
   'wide shot with plenty of the setting around them, chin down, looking at what their hands are doing',
   'medium shot, waist up, glancing sideways without turning the body',
-  'close-up, chin down and head tilted',
+  'close-up, chin down',
   'full body, head to toe, looking back over the shoulder toward the viewer',
   'wide shot with the setting around them, chin up, looking upward',
   'medium shot, three-quarter turn, glancing sideways',
   'close-up, looking back over the shoulder toward the viewer',
   'full body, head to toe, chin up',
-  'medium shot, waist up, chin down with the head tilted',
+  'medium shot, waist up, chin down',
   'wide shot, three-quarter turn, face toward the viewer',
   'close-up, chin up and glancing sideways',
-  'medium-wide, face toward the viewer, head tilted'
+  'medium-wide, face toward the viewer'
 ];
 
 // The same job for a photo with two or three people in it. The single-subject
@@ -2281,6 +2286,13 @@ const STORY_SCENES = {
 // people is optional: pass it for a family book, where each person has their own
 // photo and their own name, and leave it out for the single-subject book, which
 // still works off childCount and one photo exactly as it always did.
+// Heads upright. The model copies the tilt of the head in the photo, and used to
+// be asked for tilts besides (see SHOTS). Tested 19 Nov 2026 on the four
+// sample photos: with this line Malik, Jasmin and Owen came out level on every
+// page; Mei, whose photo is tilted about 21 degrees, still leaned a little
+// until photo-level.js straightened the photo first. The two work together.
+const HEAD_LEVEL = ' Head position: keep every head upright and level on the neck - both eyes level, the face not tilted or leaning to one side - even where a head is tilted in the photo. The photo is only for what they look like, never for how they hold their head.';
+
 function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people, detail) {
   const scenes = STORY_SCENES[theme] || STORY_SCENES['Portrait'];
   let scene = scenes[sceneIndex] || scenes[0];
@@ -2306,6 +2318,7 @@ function buildPrompt(theme, sceneIndex, childCount, subjectType, notes, people, 
   if (notes && notes.trim()) {
     prompt += ` Also incorporate this detail where it fits naturally: ${notes.trim()}.`;
   }
+  prompt += HEAD_LEVEL;
   // Last, and deliberately so. This is the instruction the model was ignoring
   // when nobody gave it one, and the end of the prompt is where it listens.
   prompt += ` ${DETAIL_LEVELS[normalizeDetail(detail)].prompt}`;
@@ -2435,6 +2448,9 @@ async function renderScene({ buffer, mimetype, filename, photos, prompt, paid, q
     ? photos
     : [{ buffer, mimetype, filename }];
   if (!references.length || !references[0].buffer) throw new Error('No reference photo to draw from.');
+  // Straighten tilted photos first (photo-level.js). One face, a real tilt, or
+  // the photo goes through untouched.
+  const sent = await Promise.all(references.map(levelPhoto));
 
   const form = new FormData();
   form.append('model', 'gpt-image-2');
@@ -2444,8 +2460,8 @@ async function renderScene({ buffer, mimetype, filename, photos, prompt, paid, q
   // A single photo keeps the field name it has always had. Several go as
   // image[], which the images API accepts and matches to the order the prompt
   // introduces people in.
-  const field = references.length > 1 ? 'image[]' : 'image';
-  references.forEach((ref, i) => {
+  const field = sent.length > 1 ? 'image[]' : 'image';
+  sent.forEach((ref, i) => {
     form.append(field, new Blob([ref.buffer], { type: ref.mimetype || 'image/jpeg' }),
       ref.filename || `photo-${i + 1}.png`);
   });
@@ -4041,5 +4057,5 @@ if (require.main === module) {
 }
 
 module.exports = { app, maybeRunDailyPayout, sendPurchaseToMeta, normalizeUsPhone, smsConsentText, SMS_SIGNUPS_PER_IP, PREVIEW_QUALITY, PAID_QUALITY, printOrders, lulu, PRINT_ENABLED, PRINT_SHIPPING_CENTS, colorizePage, inviteToTrustpilot, supportBot, adminBot, runAssistantDay, sendGiveawayReviewAsks, GIVEAWAY_CAP, previewDay, clientIp, localNow, maybeSendPayoutReport, runPayoutReport, cleanCreatorCode, reservedCreatorCode, looksLikeEmail, CREATOR_SIGNUPS_PER_IP, CREATOR_FREE_BOOKS_PER_DAY, CREATOR_RATE_PERCENT, STATEMENT_DESCRIPTOR_SUFFIX, MAX_ATTACHMENT_BYTES, bookPdf, emailBookReady,
-  sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, previewPrompt, PREVIEW_CLARITY, renderScene, maybeMirror,
+  sendAlert, watchdogRuntime, pollDelayMs, buildPrompt, previewPrompt, PREVIEW_CLARITY, HEAD_LEVEL, renderScene, maybeMirror,
   rescuePreview, rescueFailedPreviews, FREE_PREVIEW_PAGES, FREE_STRIP_IMAGES_PER_IP, takeFreePreview, quotaWindow, QUOTA_WINDOW_DAYS, STYLE_GRID, STYLE_GRID_SIZE, styleGridFor, FREE_PREVIEWS_PER_IP, canCallOpenAI: CAN_CALL_OPENAI, cleanPeople, MAX_PEOPLE, STORY_SCENES, SHOTS, BASE_STYLE, THEME_OUTFITS, wardrobeLine, SAMPLE_PAGES, DETAIL_LEVELS, DEFAULT_DETAIL, normalizeDetail };
