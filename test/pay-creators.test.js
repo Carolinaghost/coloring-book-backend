@@ -254,6 +254,16 @@ async function main() {
   check('and still nobody else twice', [raised.sent, posts.filter((p) => p.dest === 'acct_ready').length], [1, 1]);
   void broke;
 
+  console.log('\nAn earlier pay week (--week-ending)');
+  const NOW_BACK = Date.parse("2026-11-23T20:00:00Z");
+  const sat = pay.weekEndingNow('2026-11-13', NOW_BACK);
+  check('asks about the Saturday after that Friday', new Date(sat).toISOString(), '2026-11-14T12:00:00.000Z');
+  const throws = (fn) => { try { fn(); return false; } catch (e) { return true; } };
+  check('refuses a day that is not a Friday', throws(() => pay.weekEndingNow('2026-11-12', NOW_BACK)), true);
+  check('refuses a week that has not finished', throws(() => pay.weekEndingNow('2026-11-27', NOW_BACK)), true);
+  check('refuses a date that does not exist', throws(() => pay.weekEndingNow('2026-02-30', NOW_BACK)), true);
+  check('the week that just ended is allowed', new Date(pay.weekEndingNow('2026-11-20', NOW_BACK)).toISOString(), '2026-11-21T12:00:00.000Z');
+
   console.log(`\n${pass} passed, ${failures.length} failed`);
   if (failures.length) process.exit(1);
 }

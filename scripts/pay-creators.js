@@ -6,6 +6,9 @@
 //   node scripts/pay-creators.js              look, send nothing
 //   node scripts/pay-creators.js --dry-run    the same, said out loud
 //   node scripts/pay-creators.js --send       pay them, for real
+//   node scripts/pay-creators.js --week-ending 2026-11-13
+//                                             look at an earlier pay week (add --send
+//                                             to pay it); the date is the Friday it ended
 //   node scripts/pay-creators.js --send --force
 //                                             pay them even though the week's
 //                                             total is over PAYOUT_MAX_TOTAL_CENTS
@@ -81,12 +84,41 @@ const API = 'https://api.stripe.com/v1';
 const DEFAULT_MAX_PER_CREATOR_CENTS = 25000;
 const DEFAULT_MAX_TOTAL_CENTS = 100000;
 
+// --week-ending YYYY-MM-DD pays an earlier pay week instead of the one that
+// just closed: the Friday that week ended on. Added 23 Nov 2026 because the
+// tool only ever reached the latest week, and $20 of commission from earlier
+// weeks (COLORING, Jonathan's own code) had no way to be paid. It works by
+// asking the report for the week as it stood on the Saturday after that
+// Friday, so the report, the rates and the paid-twice guard are all the same
+// ones a normal run uses.
 function parseArgs(argv) {
+  const at = argv.indexOf('--week-ending');
+  let weekEnding = null;
+  if (at !== -1) {
+    weekEnding = argv[at + 1];
+    if (!weekEnding || !/^\d{4}-\d{2}-\d{2}$/.test(weekEnding)) {
+      throw new Error('--week-ending needs a date like 2026-11-13 (the Friday the pay week ended).');
+    }
+  }
   return {
     send: argv.includes('--send'),
     dryRun: argv.includes('--dry-run'),
-    force: argv.includes('--force')
+    force: argv.includes('--force'),
+    weekEnding
   };
+}
+
+// The moment to ask the report about so it picks the week that ended on that
+// Friday: midday UTC on the Saturday after (morning in US time zones). Refuses
+// a date that is not a Friday, or a week that has not finished yet.
+function weekEndingNow(weekEnding, nowMs) {
+  const [y, m, d] = weekEnding.split('-').map(Number);
+  const friday = new Date(Date.UTC(y, m - 1, d, 12));
+  if (Number.isNaN(friday.getTime()) || friday.getUTCDate() !== d) throw new Error(`${weekEnding} is not a real date.`);
+  if (friday.getUTCDay() !== 5) throw new Error(`${weekEnding} is not a Friday. Pay weeks end on Friday.`);
+  const saturday = friday.getTime() + 86400000;
+  if (saturday > nowMs) throw new Error(`The week ending ${weekEnding} has not finished yet.`);
+  return saturday;
 }
 
 // Wednesday to Friday, in the pay week's own time zone: past Tuesday payday.
@@ -257,8 +289,10 @@ async function main(deps = {}) {
   const io = { fetch: deps.fetch, key };
 
   // The report's own calculation, with the report's own settings.
+  const realNow = deps.now ? new Date(deps.now).getTime() : Date.now();
+  const askAt = args.weekEnding ? weekEndingNow(args.weekEnding, realNow) : deps.now;
   const owed = await computeOwed({
-    argv: saturdayArgs(env), key, fetch: deps.fetch, now: deps.now, warn: (...a) => print(a.join(' '))
+    argv: saturdayArgs(env), key, fetch: deps.fetch, now: askAt, warn: (...a) => print(a.join(' '))
   });
   const period = { start: owed.since, end: owed.until };
   const label = windowLabel(period.start, period.end, owed.tz);
@@ -270,9 +304,10 @@ async function main(deps = {}) {
   plan.lines.forEach((l) => { if (l.status === 'over-cap') l.cap = cap.perCreator; });
 
   print(`\nCreator payouts  (${mode}${live ? '' : ' - nothing is sent; add --send to pay'})`);
-  print(`Pay week  ${label}  ${owed.tz}\n`);
+  print(`Pay week  ${label}  ${owed.tz}${args.weekEnding ? '  (an earlier week, asked for with --week-ending)' : ''}\n`);
   // A warning, never a stop: late is sometimes the right call, and he decides.
-  if (tooLateForPayday(deps.now ? new Date(deps.now) : new Date(), owed.tz)) print(LATE_WARNING + '\n');
+  // Not for an earlier week asked for on purpose - that is late by design.
+  if (!args.weekEnding && tooLateForPayday(new Date(realNow), owed.tz)) print(LATE_WARNING + '\n');
 
   const show = (l) => {
     const who = l.creator ? `${l.creator.name} <${l.creator.email}>` : '';
@@ -333,7 +368,7 @@ if (require.main === module) {
     .catch((err) => { console.error('\nFailed:', err.message); process.exit(1); });
 }
 
-module.exports = {
+module.exports = { weekEndingNow,
   parseArgs, limits, planPayouts, transferGroup, tooLateForPayday, main,
   DEFAULT_MAX_PER_CREATOR_CENTS, DEFAULT_MAX_TOTAL_CENTS
 };
