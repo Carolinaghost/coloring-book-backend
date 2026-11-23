@@ -23,19 +23,29 @@
 const { ImapClient } = require('./imap');
 const { parseEmail } = require('./mime');
 
+// Prices come from the same settings the checkout uses, so the assistant can
+// never quote a printed-copy price the checkout does not charge. They were
+// typed into this text once, and a price change on Render left it quoting the
+// old $4.99 shipping.
+const cents = (name, fallback) => parseInt(process.env[name], 10) || fallback;
+const usd = (c) => '$' + (c / 100).toFixed(2).replace(/\.00$/, '');
+const SHIP = cents('PRINT_SHIPPING_CENTS', 499);
+const PERSONAL = cents('PRICE_CENTS', 1500);
+const FAMILY = cents('FAMILY_PRICE_CENTS', 2500);
+
 const FACTS = `
 Crayonauts (crayonauts.com) turns a photo into a personalised coloring book. It is a small family business, run by Jonathan, a service of Justice United Inc.
 - How it works: upload one clear, front-facing photo at crayonauts.com, pick a style, and see 2 finished pages free (about 20 seconds) before paying. Then press Unlock, pay, and the full book is drawn and emailed as a link.
-- Price: $15 for a personal book (one person), $25 for a family book (up to five people in one book). 15 pages. No subscription, no account, no ads.
+- Price: ${usd(PERSONAL)} for a personal book (one person), ${usd(FAMILY)} for a family book (up to five people in one book). 15 pages. No subscription, no account, no ads.
 - Styles/themes include Portrait, Superhero, Adventure, Fairy tale, Firefighter, Police Officer, Doctor, Family Keepsake, Grandparent Garden, and holiday books (Birthday, Christmas, Halloween).
 - The book is a print-ready PDF. Print it at home as many times as you like (every sibling can have a copy).
-- Printed copy: at checkout you can choose "Digital + printed copy". The printed copy is free; you pay $4.99 shipping and handling ($19.99 total for a personal book, $29.99 for a family book). It is an 8.5 x 8.5 inch stapled book, one drawing per page, printed and mailed by our print partner. US addresses only, regular mail; delivery usually takes 12-14 business days, and we email a tracking link when it ships. There is no faster shipping option.
+- Printed copy: at checkout you can choose "Digital + printed copy". The printed copy is free; you pay ${usd(SHIP)} shipping and handling (${usd(PERSONAL + SHIP)} total for a personal book, ${usd(FAMILY + SHIP)} for a family book). It is an 8.5 x 8.5 inch stapled book, one drawing per page, printed and mailed by our print partner. US addresses only, regular mail; delivery usually takes 12-14 business days, and we email a tracking link when it ships. There is no faster shipping option.
 - The download link works for 30 days. After that the drawings, email and child's name are deleted, so save the PDF.
 - The photo is deleted as soon as the book finishes drawing.
 - Checkout is through Stripe; card details never touch our server.
 - If something went wrong (book never arrived, pages missing or broken): we finish it or refund in full, customer's choice.
 - If they do not like how it turned out: email within 14 days and we redraw the book once, free (a clearer, well-lit, front-facing photo usually fixes it). If still unhappy after the redraw, we refund half. No refund just for changing your mind after downloading.
-- Free book giveaway: anyone can claim one free book (while they last) at https://crayonauts.com/free.html - it emails them a one-time code. In return we ask for an honest review. A free-book code covers the digital book only: tell them to choose "Digital only" at checkout, because the code does not cover the printed copy's $4.99 shipping.
+- Free book giveaway: anyone can claim one free book (while they last) at https://crayonauts.com/free.html - it emails them a one-time code. In return we ask for an honest review. A free-book code covers the digital book only: tell them to choose "Digital only" at checkout, because the code does not cover the printed copy's ${usd(SHIP)} shipping.
 - Creators/influencers: sign up at https://crayonauts.com/creators for a personal link, earn 20% of every sale it brings, no cap, plus a free book.
 - Other inboxes: creator sign-up questions go to admin@crayonauts.com, creator payouts to accounts@crayonauts.com.
 `.trim();
