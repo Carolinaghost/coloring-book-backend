@@ -4,7 +4,7 @@
 // Each book is still its own order - its own photo, pages, PDF, email and
 // printed copy - and the cart is only a way to pay for them together. Stripe
 // knows nothing of that: it sees one session with one line per book, one
-// shipping charge ($4.99 for the whole box - printed copies bought together
+// shipping charge (the PRINT_SHIPPING_CENTS charge for the whole box - printed copies bought together
 // are mailed together) and, if a code was used, one discount across the lot.
 //
 // Everything downstream (the printed-copy record, the Meta Purchase, the
