@@ -20,6 +20,7 @@ const { main: affiliateReport, saturdayArgs, DEFAULT_REPORT_RATES } = require('.
 const neon = require('./neon');
 const textGuard = require('./text-guard');
 const metaCapi = require('./meta-capi');
+const trybe = require('./trybe');
 const dailyPayout = require('./daily-payout');
 const cart = require('./cart');
 
@@ -255,6 +256,11 @@ async function fulfilPaidOrder(order, session) {
   // The event id matches the one the browser's Pixel uses, so Meta keeps
   // one copy. Not awaited - Stripe is waiting on this reply.
   if (order && Number(session.amount_total) > 0) sendPurchaseToMeta(order, session);
+
+  // Trybe: tells the creator platform about the sale so a creator whose video
+  // brought this buyer gets credited. Only when the browser gave us Trybe's
+  // visitor id; free books are skipped. Not awaited, never touches the order.
+  if (order && Number(session.amount_total) > 0) trybe.sendOrder({ order, session }).catch(() => null);
 }
 
 // Mounted before express.json() on purpose — signature verification needs the
@@ -1309,6 +1315,9 @@ app.post('/checkout', async (req, res) => {
     if (fbDetails.ip) form.append('metadata[fb_ip]', fbDetails.ip);
     if (fbDetails.ua) form.append('metadata[fb_ua]', fbDetails.ua);
     if (fbDetails.url) form.append('metadata[fb_url]', fbDetails.url);
+    // Trybe's visitor id from the browser, for the paid order sent to Trybe.
+    const trybeVid = trybe.cleanVid(body.trybe);
+    if (trybeVid) form.append('metadata[trybe_vid]', trybeVid);
     if (printCount > 0) {
       // Lulu needs a phone number on every address - the carriers require it.
       form.append('shipping_address_collection[allowed_countries][0]', 'US');
